@@ -1,0 +1,26 @@
+{
+  "name": "anevo-gtm",
+  "version": "1.0.0",
+  "description": "B2B outbound data procurement system for Anevo Marketing",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"No tests configured\" && exit 0"
+  },
+  "keywords": [
+    "b2b",
+    "outbound",
+    "lead-generation",
+    "data-enrichment"
+  ],
+  "author": "Anevo Marketing",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "axios": "^1.16.1",
+    "csv-parse": "^6.2.1",
+    "dotenv": "^17.4.2",
+    "localtunnel": "^2.0.2",
+    "openai": "^6.38.0"
+  }
+}

@@ -1,0 +1,36 @@
+# Environment — contains secrets
+.env
+.env.*
+!.env.example
+
+# Data directories — ignore file contents, keep directory structure via .gitkeep
+data/raw/*
+!data/raw/.gitkeep
+data/cleaned/*
+!data/cleaned/.gitkeep
+data/enriched/*
+!data/enriched/.gitkeep
+data/final/*
+!data/final/.gitkeep
+
+# Logs — ignore file contents, keep directory structure
+logs/*
+!logs/.gitkeep
+
+# Jobs — ignore runtime job files, keep directory structure
+jobs/queued/*
+!jobs/queued/.gitkeep
+jobs/processing/*
+!jobs/processing/.gitkeep
+jobs/completed/*
+!jobs/completed/.gitkeep
+jobs/failed/*
+!jobs/failed/.gitkeep
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
