@@ -8,8 +8,7 @@ const OpenAI = require("openai");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
 const ROOT = path.resolve(__dirname, "../..");
-const BATCH_SIZE = 5;
-const BATCH_DELAY_MS = 1000;
+const BATCH_SIZE = 50;
 const domainCache = require("../utils/domain-cache");
 
 // ---------------------------------------------------------------------------
@@ -70,6 +69,81 @@ function sleep(ms) {
 }
 
 // ---------------------------------------------------------------------------
+// Rate limiters (sliding window)
+// ---------------------------------------------------------------------------
+
+class RateLimiter {
+  constructor(maxPerMinute, name) {
+    this.maxPerMinute = maxPerMinute;
+    this.name = name;
+    this.timestamps = [];
+  }
+
+  async acquire() {
+    const now = Date.now();
+    // Evict timestamps older than 1 minute
+    this.timestamps = this.timestamps.filter((t) => now - t < 60_000);
+
+    if (this.timestamps.length >= this.maxPerMinute) {
+      // Wait until the oldest request falls off the window
+      const waitMs = 60_000 - (now - this.timestamps[0]) + 50;
+      log(
+        `Rate limit approached (${this.name}: ${this.timestamps.length}/${this.maxPerMinute} RPM), ` +
+        `throttling ${(waitMs / 1000).toFixed(1)}s…`
+      );
+      await sleep(waitMs);
+      return this.acquire(); // recheck after waiting
+    }
+
+    this.timestamps.push(Date.now());
+  }
+}
+
+// OpenAI: 500 RPM limit → use 450 (10% buffer)
+const openaiLimiter = new RateLimiter(450, "OpenAI");
+
+// OpenRouter: 80 RPM (conservative; adjust if your tier is higher)
+const openrouterLimiter = new RateLimiter(80, "OpenRouter");
+
+// ---------------------------------------------------------------------------
+// Retry wrapper (exponential backoff on 429 / transient errors)
+// ---------------------------------------------------------------------------
+
+const RETRY_DELAYS_MS = [2000, 4000, 8000, 16000];
+
+async function withRetry(fn, label, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.status ?? err.response?.status;
+      const is429 = status === 429;
+      const isTransient =
+        is429 ||
+        err.code === "ECONNRESET" ||
+        err.code === "ETIMEDOUT" ||
+        err.code === "ECONNABORTED" ||
+        status === 503 ||
+        status === 502;
+
+      if (attempt >= maxAttempts) {
+        log(`${label}: failed after ${maxAttempts} attempts — ${err.message}`);
+        throw err;
+      }
+
+      if (!isTransient) throw err; // don't retry hard errors (400, 401, etc.)
+
+      const delay = RETRY_DELAYS_MS[attempt - 1] ?? 16000;
+      log(
+        `${label}: ${is429 ? "429 rate limit" : err.code ?? status} received, ` +
+        `retrying in ${delay / 1000}s… (attempt ${attempt}/${maxAttempts})`
+      );
+      await sleep(delay);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Job config lookup
 // ---------------------------------------------------------------------------
 
@@ -97,10 +171,11 @@ function formatIcpCriteria(icp) {
 }
 
 // ---------------------------------------------------------------------------
-// Enrichment functions
+// Enrichment functions (each acquires a rate-limit token before every attempt)
 // ---------------------------------------------------------------------------
 
 async function enrichWebsiteSummary(row) {
+  const label = `[${row.first_name}] website_summary`;
   const prompt =
     `I want you to visit this website ${row.company_website || "(no website)"} ` +
     `for this company ${row.company || "(unknown)"} and summarize what their business ` +
@@ -108,43 +183,49 @@ async function enrichWebsiteSummary(row) {
     `information. Please make an exhaustive business research summary that includes ` +
     `all possible data you can find. Stop at nothing.`;
 
-  const res = await openai.responses.create({
-    model: "gpt-4o-mini",
-    tools: [{ type: "web_search_preview" }],
-    input: prompt,
-  });
-  return res.output_text?.trim() ?? "";
+  return withRetry(async () => {
+    await openaiLimiter.acquire();
+    const res = await openai.responses.create({
+      model: "gpt-4o-mini",
+      tools: [{ type: "web_search_preview" }],
+      input: prompt,
+    });
+    return res.output_text?.trim() ?? "";
+  }, label);
 }
 
 async function enrichIcpClassification(row, icpCriteria, icpContext) {
+  const label = `[${row.first_name}] icp_classification`;
   let userPrompt =
     `Determine if this company is a good fit based on:\n${row.website_summary}\n` +
     `ICP criteria: ${icpCriteria}\n`;
-  if (icpContext) {
-    userPrompt += `Additional context: ${icpContext}\n`;
-  }
+  if (icpContext) userPrompt += `Additional context: ${icpContext}\n`;
   userPrompt +=
     `If good fit respond ONLY with: icp fit\n` +
     `If bad fit respond ONLY with: not a fit`;
 
-  const res = await openrouter.post("/chat/completions", {
-    model: "deepseek/deepseek-v3.2",
-    max_tokens: 50,
-    temperature: 0,
-    reasoning: { enabled: false },
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a B2B company classifier. Respond with ONLY the exact classification label. No explanations, no preamble, no extra text.",
-      },
-      { role: "user", content: userPrompt },
-    ],
-  });
-  return res.data.choices[0].message.content?.trim() ?? "";
+  return withRetry(async () => {
+    await openrouterLimiter.acquire();
+    const res = await openrouter.post("/chat/completions", {
+      model: "deepseek/deepseek-v3.2",
+      max_tokens: 50,
+      temperature: 0,
+      reasoning: { enabled: false },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a B2B company classifier. Respond with ONLY the exact classification label. No explanations, no preamble, no extra text.",
+        },
+        { role: "user", content: userPrompt },
+      ],
+    });
+    return res.data.choices[0].message.content?.trim() ?? "";
+  }, label);
 }
 
 async function enrichBusinessType(row, templateSentence) {
+  const label = `[${row.first_name}] business_type`;
   let prompt =
     `I am going to feed you a company's business description and I want you to find a label (1-2 words) ` +
     `to describe the company type. I want you to choose a label that someone who works at the company ` +
@@ -181,16 +262,20 @@ async function enrichBusinessType(row, templateSentence) {
     `Here is the business description: ${row.website_summary}\n\n` +
     `Output ONLY the label. No explanations. Maximum 2 words.`;
 
-  const res = await openrouter.post("/chat/completions", {
-    model: "openai/gpt-4o-mini",
-    max_tokens: 10,
-    temperature: 0,
-    messages: [{ role: "user", content: prompt }],
-  });
-  return res.data.choices[0].message.content?.trim() ?? "";
+  return withRetry(async () => {
+    await openrouterLimiter.acquire();
+    const res = await openrouter.post("/chat/completions", {
+      model: "openai/gpt-4o-mini",
+      max_tokens: 10,
+      temperature: 0,
+      messages: [{ role: "user", content: prompt }],
+    });
+    return res.data.choices[0].message.content?.trim() ?? "";
+  }, label);
 }
 
 async function enrichDecisionMakers(row, decisionMakerContext) {
+  const label = `[${row.first_name}] decision_makers`;
   let prompt =
     `I want you to output the first and last name of the most senior person from this company ${row.company || "(unknown)"}. ` +
     `Here is their website: ${row.company_website || "(no website)"}. `;
@@ -210,12 +295,15 @@ async function enrichDecisionMakers(row, decisionMakerContext) {
     `No job titles, no explanations, no other text. ` +
     `Scour the internet including LinkedIn. Stop at nothing.`;
 
-  const res = await openai.responses.create({
-    model: "gpt-4o-mini",
-    tools: [{ type: "web_search_preview" }],
-    input: prompt,
-  });
-  return res.output_text?.trim() ?? "";
+  return withRetry(async () => {
+    await openaiLimiter.acquire();
+    const res = await openai.responses.create({
+      model: "gpt-4o-mini",
+      tools: [{ type: "web_search_preview" }],
+      input: prompt,
+    });
+    return res.output_text?.trim() ?? "";
+  }, label);
 }
 
 // ---------------------------------------------------------------------------
@@ -353,9 +441,9 @@ async function main() {
       }
     }
 
-    log(`  ${toProcess.length} record(s) to enrich in batches of ${BATCH_SIZE}`);
+    log(`  ${toProcess.length} record(s) to enrich — batch size: ${BATCH_SIZE}`);
 
-    // Process in parallel batches
+    // Process in parallel batches; rate limiters handle all throttling
     const totalBatches = Math.ceil(toProcess.length / BATCH_SIZE);
 
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
@@ -375,10 +463,6 @@ async function main() {
       log(`  ── Batch ${batchNum}/${totalBatches} completed in ${batchElapsed}s`);
 
       processed += batch.length;
-
-      if (i + BATCH_SIZE < toProcess.length) {
-        await sleep(BATCH_DELAY_MS);
-      }
     }
 
     const totalElapsed = ((Date.now() - runStart) / 1000).toFixed(1);
