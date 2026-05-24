@@ -276,24 +276,29 @@ async function enrichBusinessType(row, templateSentence) {
 
 async function enrichDecisionMakers(row, decisionMakerContext) {
   const label = `[${row.first_name}] decision_makers`;
+  const excludeName = `${row.first_name || ""} ${row.last_name || ""}`.trim();
+
   let prompt =
-    `I want you to output the first and last name of the most senior person from this company ${row.company || "(unknown)"}. ` +
-    `Here is their website: ${row.company_website || "(no website)"}. `;
+    `Find the most senior person at the company "${row.company || "(unknown)"}" ` +
+    `(website: ${row.company_website || "(no website)"}).\n\n`;
 
   if (decisionMakerContext) {
-    prompt += `Targeting instructions: ${decisionMakerContext} `;
+    prompt += `Targeting instructions: ${decisionMakerContext}\n\n`;
   } else {
     prompt +=
-      `Assess seniority based on common hierarchical titles (CEO > VP > Director > Manager > Associate). `;
+      `Rank seniority by title: CEO > President > COO > VP > Director > Manager > Associate.\n\n`;
   }
 
   prompt +=
-    `If the person who best fits has the same name as ${row.first_name || ""} ${row.last_name || ""} then select a different person. ` +
-    `If there is no other person output: No other contact. ` +
-    `Ignore middle names, initials, prefixes, suffixes. ` +
-    `Output only the cleaned first and last name. ` +
-    `No job titles, no explanations, no other text. ` +
-    `Scour the internet including LinkedIn. Stop at nothing.`;
+    `HARD CONSTRAINT: Do NOT return "${excludeName}" — that is the contact you are already researching. ` +
+    `If the most senior person found has the same name as "${excludeName}", ` +
+    `select the next most senior person instead. ` +
+    `If there is no other person at the company, output exactly: No other contact\n\n` +
+    `Output rules:\n` +
+    `- Output only the person's first and last name\n` +
+    `- No job titles, no company name, no explanations, no punctuation\n` +
+    `- Ignore middle names, initials, honorifics, suffixes\n` +
+    `- Scour the company website and LinkedIn. One name only.`;
 
   return withRetry(async () => {
     await openaiLimiter.acquire();
@@ -307,20 +312,20 @@ async function enrichDecisionMakers(row, decisionMakerContext) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-record enrichment (sequential within a record, ICP short-circuit)
+// Batch enrichment — three explicit phases, all calls within each phase fire
+// simultaneously so the slowest call in a phase gates the next phase, not
+// the slowest call overall.
 // ---------------------------------------------------------------------------
 
-async function enrichRecord(row, enrichments, icpCriteria, icpContext, businessTypeTemplate, decisionMakerCtx) {
-  const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
-
-  // 1. Website Summary (domain cache → API fallback)
-  if (enrichments.websiteSummary) {
+async function runPhase1WebsiteSummaries(batch, enrichments) {
+  if (!enrichments.websiteSummary) return;
+  await Promise.all(batch.map(async (row) => {
+    const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
     try {
       const cached = domainCache.getCachedSummary(row.company_website);
       if (cached) {
         row.website_summary = cached;
-        const domain = domainCache.normalizeDomain(row.company_website);
-        log(`     [${label}] website_summary: cache hit (${domain})`);
+        log(`     [${label}] website_summary: cache hit (${domainCache.normalizeDomain(row.company_website)})`);
       } else {
         row.website_summary = await enrichWebsiteSummary(row);
         domainCache.saveSummary(row.company_website, row.website_summary);
@@ -330,10 +335,13 @@ async function enrichRecord(row, enrichments, icpCriteria, icpContext, businessT
       row.website_summary = "error";
       log(`     [${label}] website_summary ERROR: ${err.message}`);
     }
-  }
+  }));
+}
 
-  // 2. ICP Classification — short-circuit if not a fit
-  if (enrichments.icpClassification) {
+async function runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext) {
+  if (!enrichments.icpClassification) return;
+  await Promise.all(batch.map(async (row) => {
+    const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
     try {
       row.icp_classification = await enrichIcpClassification(row, icpCriteria, icpContext);
       log(`     [${label}] icp_classification: ${row.icp_classification}`);
@@ -341,26 +349,26 @@ async function enrichRecord(row, enrichments, icpCriteria, icpContext, businessT
       row.icp_classification = "error";
       log(`     [${label}] icp_classification ERROR: ${err.message}`);
     }
+  }));
+}
 
-    if (row.icp_classification !== "icp fit") {
-      log(`     [${label}] → not a fit, skipping business type + decision maker`);
-      return;
-    }
-  }
-
-  // 3. Business Type + Decision Maker in parallel (ICP fits only)
-  await Promise.all([
-    enrichments.businessLabeling
-      ? enrichBusinessType(row, businessTypeTemplate)
-          .then((r) => { row.business_type = r; log(`     [${label}] business_type: ${r}`); })
-          .catch((err) => { row.business_type = "error"; log(`     [${label}] business_type ERROR: ${err.message}`); })
-      : Promise.resolve(),
-    enrichments.decisionMakerDiscovery
-      ? enrichDecisionMakers(row, decisionMakerCtx)
-          .then((r) => { row.additional_decision_makers = r; log(`     [${label}] decision_makers: ${r}`); })
-          .catch((err) => { row.additional_decision_makers = "error"; log(`     [${label}] decision_makers ERROR: ${err.message}`); })
-      : Promise.resolve(),
-  ]);
+async function runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx) {
+  if (!icpFits.length) return;
+  await Promise.all(icpFits.flatMap((row) => {
+    const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
+    return [
+      enrichments.businessLabeling
+        ? enrichBusinessType(row, businessTypeTemplate)
+            .then((r) => { row.business_type = r; log(`     [${label}] business_type: ${r}`); })
+            .catch((err) => { row.business_type = "error"; log(`     [${label}] business_type ERROR: ${err.message}`); })
+        : Promise.resolve(),
+      enrichments.decisionMakerDiscovery
+        ? enrichDecisionMakers(row, decisionMakerCtx)
+            .then((r) => { row.additional_decision_makers = r; log(`     [${label}] decision_makers: ${r}`); })
+            .catch((err) => { row.additional_decision_makers = "error"; log(`     [${label}] decision_makers ERROR: ${err.message}`); })
+        : Promise.resolve(),
+    ];
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +451,7 @@ async function main() {
 
     log(`  ${toProcess.length} record(s) to enrich — batch size: ${BATCH_SIZE}`);
 
-    // Process in parallel batches; rate limiters handle all throttling
+    // Process in parallel batches — three explicit phases per batch
     const totalBatches = Math.ceil(toProcess.length / BATCH_SIZE);
 
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
@@ -451,13 +459,33 @@ async function main() {
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const batchStart = Date.now();
 
-      log(`  ── Batch ${batchNum}/${totalBatches}: [${batch.map((r) => r.first_name).join(", ")}]`);
+      log(`  ── Batch ${batchNum}/${totalBatches} (${batch.length} records)`);
 
-      await Promise.all(
-        batch.map((row) =>
-          enrichRecord(row, enrichments, icpCriteria, icpContext, businessTypeTemplate, decisionMakerCtx)
-        )
+      // Phase 1: all website summaries simultaneously
+      const p1Start = Date.now();
+      await runPhase1WebsiteSummaries(batch, enrichments);
+      log(`  ── Phase 1 (website summaries): ${((Date.now() - p1Start) / 1000).toFixed(1)}s`);
+
+      // Phase 2: all ICP classifications simultaneously
+      const p2Start = Date.now();
+      await runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext);
+      const icpFits = enrichments.icpClassification
+        ? batch.filter((r) => r.icp_classification === "icp fit")
+        : batch;
+      log(
+        `  ── Phase 2 (ICP classification): ${((Date.now() - p2Start) / 1000).toFixed(1)}s` +
+        ` — ${icpFits.length}/${batch.length} fit` +
+        (enrichments.icpClassification
+          ? ` (${batch.length - icpFits.length} skipped)`
+          : "")
       );
+
+      // Phase 3: business type + decision makers for ICP fits simultaneously
+      const p3Start = Date.now();
+      await runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx);
+      if (icpFits.length > 0) {
+        log(`  ── Phase 3 (business type + decision makers): ${((Date.now() - p3Start) / 1000).toFixed(1)}s`);
+      }
 
       const batchElapsed = ((Date.now() - batchStart) / 1000).toFixed(1);
       log(`  ── Batch ${batchNum}/${totalBatches} completed in ${batchElapsed}s`);
