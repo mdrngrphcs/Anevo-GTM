@@ -225,27 +225,64 @@ async function main() {
   const filters = translateFilters(job.icp);
   log(jobId, `AI Ark filters: ${JSON.stringify(filters)}`);
 
-  // ── Step 1: People search ────────────────────────────────────────────────
+  // ── Step 1: People search (paginated) ───────────────────────────────────
 
   log(jobId, "Step 1 — Calling AI Ark /people …");
 
-  let people;
-  let trackId;
+  const recordLimit = job.recordLimit ?? null;
+  log(jobId, `Record limit: ${recordLimit ?? "none (pull all)"}`);
+
+  const PAGE_SIZE = recordLimit ? Math.min(recordLimit, 100) : 100;
+  let people = [];
+  let trackId = null;
 
   try {
-    const { data } = await axios.post(
-      PEOPLE_ENDPOINT,
-      { account: filters.account, contact: filters.contact, page: 0, size: 5 },
-      { headers: authHeaders(apiKey), timeout: 30000 }
-    );
+    let page = 0;
+    const pullStart = Date.now();
 
-    log(jobId, `Step 1 — Raw response keys: ${Object.keys(data).join(", ")}`);
-    log(jobId, `Step 1 — Full response (non-content): ${JSON.stringify({ ...data, content: `[${(data.content ?? []).length} records]` })}`);
+    while (true) {
+      const pageSize = recordLimit
+        ? Math.min(recordLimit - people.length, PAGE_SIZE)
+        : PAGE_SIZE;
 
-    people  = data.content ?? [];
-    trackId = data.trackId ?? data.track_id ?? data.id ?? null;
+      const pageStart = Date.now();
+      log(jobId, `Step 1 — Fetching page ${page} (size=${pageSize}) …`);
+      const { data } = await axios.post(
+        PEOPLE_ENDPOINT,
+        { account: filters.account, contact: filters.contact, page, size: pageSize },
+        { headers: authHeaders(apiKey), timeout: 30000 }
+      );
+      log(jobId, `Step 1 — Page ${page} fetched in ${((Date.now() - pageStart) / 1000).toFixed(1)}s`);
 
-    log(jobId, `Step 1 — ${people.length} record(s) returned, trackId = ${trackId}`);
+      if (page === 0) {
+        log(jobId, `Step 1 — Response keys: ${Object.keys(data).join(", ")}`);
+        log(jobId, `Step 1 — Metadata: ${JSON.stringify({ ...data, content: `[${(data.content ?? []).length} records]` })}`);
+        trackId = data.trackId ?? data.track_id ?? data.id ?? null;
+        log(jobId, `Step 1 — trackId = ${trackId}, totalElements = ${data.totalElements ?? "unknown"}`);
+      }
+
+      const batch = data.content ?? [];
+      people.push(...batch);
+      log(jobId, `Step 1 — Page ${page}: ${batch.length} record(s) — total so far: ${people.length}`);
+
+      // Stop if we have enough records
+      if (recordLimit && people.length >= recordLimit) {
+        people = people.slice(0, recordLimit);
+        log(jobId, `Record limit (${recordLimit}) reached — stopping pagination`);
+        break;
+      }
+
+      // Stop if this was the last page
+      if (data.last === true || batch.length === 0) {
+        break;
+      }
+
+      page++;
+      await sleep(1000); // avoid hammering the API between pages
+    }
+
+    const pullElapsed = ((Date.now() - pullStart) / 1000).toFixed(1);
+    log(jobId, `Step 1 — Pull complete: ${people.length} total record(s) in ${pullElapsed}s, trackId = ${trackId}`);
   } catch (err) {
     const detail = err.response?.data ?? err.message;
     log(jobId, `Step 1 — Failed: ${JSON.stringify(detail)}`);
@@ -262,9 +299,13 @@ async function main() {
   } else {
     let server = null;
     let tunnel = null;
+    const emailFinderStart = Date.now();
 
     try {
       // 2 — Start local webhook receiver + tunnel
+      // Note: AI Ark email finder is a server-side batch operation — one POST triggers
+      // email discovery for all records in the trackId simultaneously. There are no
+      // per-record lookups to run concurrently; we receive a single webhook with all results.
       log(jobId, "Step 2 — Starting local webhook receiver …");
 
       const webhookPayload = await new Promise(async (resolve) => {
@@ -277,7 +318,11 @@ async function main() {
           req.on("data", (chunk) => { raw += chunk; });
           req.on("end", () => {
             res.writeHead(200); res.end("ok");
-            if (!settled) { settled = true; resolve(raw); }
+            if (!settled) {
+              settled = true;
+              log(jobId, `Step 2 — Webhook received after ${((Date.now() - emailFinderStart) / 1000).toFixed(1)}s`);
+              resolve(raw);
+            }
           });
         });
 
@@ -286,22 +331,25 @@ async function main() {
         log(jobId, `Step 2 — Local server on port ${port}`);
 
         // Expose via localtunnel
+        const tunnelStart = Date.now();
         tunnel = await localtunnel({ port });
-        log(jobId, `Step 2 — Tunnel URL: ${tunnel.url}`);
+        log(jobId, `Step 2 — Tunnel up in ${((Date.now() - tunnelStart) / 1000).toFixed(1)}s: ${tunnel.url}`);
 
         // Trigger email finder
         log(jobId, `Step 2 — Triggering email finder: POST ${EMAIL_FINDER_BASE}`);
+        const triggerStart = Date.now();
         const triggerRes = await axios.post(
           EMAIL_FINDER_BASE,
           { trackId, webhook: tunnel.url },
           { headers: authHeaders(apiKey), timeout: 30000 }
         );
-        log(jobId, `Step 2 — Trigger response: ${JSON.stringify(triggerRes.data)}`);
+        log(jobId, `Step 2 — Trigger response (${((Date.now() - triggerStart) / 1000).toFixed(1)}s): ${JSON.stringify(triggerRes.data)}`);
 
         // 3 — Poll statistics until DONE (webhook may arrive first)
         log(jobId, `Step 3 — Polling statistics every ${EMAIL_POLL_INTERVAL_MS / 1000}s (max ${EMAIL_POLL_TIMEOUT_MS / 1000}s) …`);
         const deadline = Date.now() + EMAIL_POLL_TIMEOUT_MS;
         let attempt = 0;
+        const pollStart = Date.now();
 
         while (!settled && Date.now() < deadline) {
           await sleep(EMAIL_POLL_INTERVAL_MS);
@@ -320,11 +368,12 @@ async function main() {
           }
 
           const state = statsData.state ?? "";
-          log(jobId, `Step 3 — Poll ${attempt}: state=${state} found=${statsData.statistics?.found ?? "?"}/${statsData.statistics?.total ?? "?"}`);
+          const elapsed = ((Date.now() - pollStart) / 1000).toFixed(1);
+          log(jobId, `Step 3 — Poll ${attempt} (+${elapsed}s): state=${state} found=${statsData.statistics?.found ?? "?"}/${statsData.statistics?.total ?? "?"}`);
 
           if (state === "DONE" || state === "done" || state === "completed") {
-            log(jobId, "Step 3 — Statistics show DONE — waiting up to 60s for webhook …");
-            await sleep(60000);
+            log(jobId, "Step 3 — Statistics show DONE — waiting up to 120s for webhook …");
+            await sleep(120000);
             if (!settled) { settled = true; resolve(null); }
             break;
           }
@@ -379,6 +428,7 @@ async function main() {
       const detail = err.response?.data ?? err.message;
       log(jobId, `Email finder failed (non-fatal) [HTTP ${status}]: ${JSON.stringify(detail)}`);
     } finally {
+      log(jobId, `Step 2-4 — Email finder total time: ${((Date.now() - emailFinderStart) / 1000).toFixed(1)}s`);
       if (tunnel) tunnel.close();
       if (server) server.close();
     }

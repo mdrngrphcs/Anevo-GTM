@@ -195,6 +195,14 @@ function recordsToCsv(records) {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -210,30 +218,61 @@ async function main() {
   moveJob(job, "queued", "processing");
   log(jobId, "Status → processing");
 
+  const recordLimit = job.recordLimit ?? null;
+  log(jobId, `Record limit: ${recordLimit ?? "none (pull all)"}`);
+
   const filters = translateFilters(job.icp);
   log(jobId, `Apollo filters: ${JSON.stringify(filters)}`);
 
-  const payload = {
-    page: 1,
-    per_page: 5,
-    reveal_personal_emails: true,
-    reveal_phone_number: true,
-    ...filters,
+  const apolloHeaders = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-cache",
+    "X-Api-Key": apiKey,
   };
 
-  log(jobId, "Calling Apollo /people/search …");
+  const PER_PAGE = recordLimit ? Math.min(recordLimit, 100) : 100;
+  let people = [];
+  let page = 1;
+  let totalEntries = null;
 
-  let people;
   try {
-    const { data } = await axios.post(APOLLO_ENDPOINT, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": apiKey,
-      },
-    });
-    people = data.people || [];
-    log(jobId, `Apollo returned ${people.length} record(s) (pagination.total_entries: ${data.pagination?.total_entries ?? "unknown"})`);
+    while (true) {
+      const payload = {
+        page,
+        per_page: PER_PAGE,
+        reveal_personal_emails: true,
+        reveal_phone_number: true,
+        ...filters,
+      };
+
+      log(jobId, `Fetching page ${page} (per_page=${PER_PAGE}) …`);
+      const { data } = await axios.post(APOLLO_ENDPOINT, payload, { headers: apolloHeaders });
+      const batch = data.people || [];
+
+      if (totalEntries === null) {
+        totalEntries = data.pagination?.total_entries ?? null;
+        log(jobId, `Total matching entries: ${totalEntries ?? "unknown"}`);
+      }
+
+      people.push(...batch);
+      log(jobId, `Page ${page}: ${batch.length} record(s) — total so far: ${people.length}`);
+
+      // Stop if we have enough records
+      if (recordLimit && people.length >= recordLimit) {
+        people = people.slice(0, recordLimit);
+        log(jobId, `Record limit (${recordLimit}) reached — stopping pagination`);
+        break;
+      }
+
+      // Stop if this was the last page
+      const totalPages = data.pagination?.total_pages ?? null;
+      if (batch.length < PER_PAGE || (totalPages && page >= totalPages)) {
+        break;
+      }
+
+      page++;
+      await sleep(1000); // respect Apollo rate limits between pages
+    }
   } catch (err) {
     const detail = err.response?.data ?? err.message;
     log(jobId, `Apollo request failed: ${JSON.stringify(detail)}`);
@@ -241,6 +280,8 @@ async function main() {
     log(jobId, "Status → failed");
     process.exit(1);
   }
+
+  log(jobId, `Pull complete — ${people.length} total record(s)`);
 
   const rawDir = path.join(ROOT, "data/raw");
   fs.mkdirSync(rawDir, { recursive: true });

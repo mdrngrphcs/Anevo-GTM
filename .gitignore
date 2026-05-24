@@ -31,6 +31,14 @@ jobs/failed/*
 node_modules/
 npm-debug.log*
 
+# Next.js
+app/.next/
+app/node_modules/
+
+# Pending job configs
+jobs/pending/*
+!jobs/pending/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
