@@ -10,6 +10,22 @@ require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 const ROOT = path.resolve(__dirname, "../..");
 const BATCH_SIZE = 50;
 const domainCache = require("../utils/domain-cache");
+const { saveCheckpoint, loadCheckpoint } = require("../utils/checkpoint");
+
+// ---------------------------------------------------------------------------
+// CLI argument parsing  (--job-id=xxx  --start-batch=N)
+// ---------------------------------------------------------------------------
+
+const cliArgs = Object.fromEntries(
+  process.argv.slice(2)
+    .filter((a) => a.startsWith("--"))
+    .map((a) => {
+      const eq = a.indexOf("=");
+      return eq === -1 ? [a.slice(2), true] : [a.slice(2, eq), a.slice(eq + 1)];
+    })
+);
+const JOB_ID_ARG    = cliArgs["job-id"] ?? null;
+const START_BATCH   = parseInt(cliArgs["start-batch"] ?? "0", 10) || 0;
 
 // ---------------------------------------------------------------------------
 // Clients
@@ -110,6 +126,7 @@ const openrouterLimiter = new RateLimiter(80, "OpenRouter");
 // ---------------------------------------------------------------------------
 
 const RETRY_DELAYS_MS = [2000, 4000, 8000, 16000];
+const RATE_LIMIT_PAUSE_MS = 60_000;
 
 async function withRetry(fn, label, maxAttempts = 5) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -127,6 +144,17 @@ async function withRetry(fn, label, maxAttempts = 5) {
         status === 502;
 
       if (attempt >= maxAttempts) {
+        if (is429) {
+          // 429 still hitting after all retries — pause 60s then one final attempt
+          log(`${label}: rate limit persisting after ${maxAttempts} retries — pausing 60s before final attempt…`);
+          await sleep(RATE_LIMIT_PAUSE_MS);
+          try {
+            return await fn();
+          } catch (finalErr) {
+            log(`${label}: failed after 60s pause — ${finalErr.message}`);
+            throw finalErr;
+          }
+        }
         log(`${label}: failed after ${maxAttempts} attempts — ${err.message}`);
         throw err;
       }
@@ -154,6 +182,14 @@ function findJobForCleanedFile(cleanedFilename) {
   for (const f of fs.readdirSync(completedDir).filter((x) => x.endsWith(".json"))) {
     const job = JSON.parse(fs.readFileSync(path.join(completedDir, f), "utf8"));
     if (job.outputFilename === rawFilename) return job;
+  }
+  return null;
+}
+
+function findJobById(jobId) {
+  for (const dir of ["completed", "processing", "failed", "queued"]) {
+    const p = path.join(ROOT, "jobs", dir, `${jobId}.json`);
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
   }
   return null;
 }
@@ -385,7 +421,25 @@ async function main() {
   const enrichedDir = path.join(ROOT, "data/enriched");
   fs.mkdirSync(enrichedDir, { recursive: true });
 
-  const cleanedFiles = fs.readdirSync(cleanedDir).filter((f) => f.endsWith(".csv"));
+  // If --job-id supplied, process only that job's cleaned file
+  let cleanedFiles;
+  if (JOB_ID_ARG) {
+    const targetJob = findJobById(JOB_ID_ARG);
+    if (targetJob) {
+      const cleanedFilename = targetJob.outputFilename.replace("_raw_", "_cleaned_");
+      if (fs.existsSync(path.join(cleanedDir, cleanedFilename))) {
+        cleanedFiles = [cleanedFilename];
+        log(`  Scoped to job ${JOB_ID_ARG} → ${cleanedFilename}`);
+      } else {
+        throw new Error(`Cleaned file not found for job ${JOB_ID_ARG}: ${cleanedFilename}`);
+      }
+    } else {
+      throw new Error(`Job not found in any jobs/ directory: ${JOB_ID_ARG}`);
+    }
+  } else {
+    cleanedFiles = fs.readdirSync(cleanedDir).filter((f) => f.endsWith(".csv"));
+  }
+
   if (!cleanedFiles.length) throw new Error("No CSV files found in data/cleaned/");
 
   for (const filename of cleanedFiles) {
@@ -449,14 +503,46 @@ async function main() {
       }
     }
 
-    log(`  ${toProcess.length} record(s) to enrich — batch size: ${BATCH_SIZE}`);
+    // On resume: merge previously-enriched column values back into rows
+    // so skipped batches still have their data in the output CSV.
+    const startBatch = JOB_ID_ARG ? START_BATCH : 0;
+    if (startBatch > 0 && fs.existsSync(enrichedPath)) {
+      try {
+        const priorRows = parse(fs.readFileSync(enrichedPath, "utf8"), {
+          columns: true, skip_empty_lines: true, trim: true,
+        });
+        const byEmail = new Map(priorRows.map((r) => [r.email, r]));
+        for (const row of rows) {
+          const prior = byEmail.get(row.email);
+          if (prior) {
+            for (const col of newCols) {
+              if (prior[col] !== undefined && prior[col] !== "") row[col] = prior[col];
+            }
+          }
+        }
+        log(`  Loaded ${priorRows.length} rows from prior run (resuming from batch ${startBatch})`);
+      } catch {
+        log(`  Warning: could not load prior enriched file — starting enrichment from scratch`);
+      }
+    }
+
+    log(`  ${toProcess.length} record(s) to enrich — batch size: ${BATCH_SIZE}${startBatch > 0 ? ` — resuming from batch ${startBatch}` : ""}`);
 
     // Process in parallel batches — three explicit phases per batch
     const totalBatches = Math.ceil(toProcess.length / BATCH_SIZE);
 
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+      const batchIndex = Math.floor(i / BATCH_SIZE); // 0-based
+      const batchNum   = batchIndex + 1;              // 1-based for display
+
+      // Skip batches already completed in a prior interrupted run
+      if (batchIndex < startBatch) {
+        log(`  ── Batch ${batchNum}/${totalBatches} — skipped (completed in prior run)`);
+        processed += Math.min(BATCH_SIZE, toProcess.length - i);
+        continue;
+      }
+
       const batch = toProcess.slice(i, i + BATCH_SIZE);
-      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const batchStart = Date.now();
 
       log(`  ── Batch ${batchNum}/${totalBatches} (${batch.length} records)`);
@@ -491,10 +577,31 @@ async function main() {
       log(`  ── Batch ${batchNum}/${totalBatches} completed in ${batchElapsed}s`);
 
       processed += batch.length;
+
+      // Write enriched CSV after every batch so partial results survive a crash
+      fs.writeFileSync(enrichedPath, stringifyCSV(outHeaders, rows));
+
+      // Save batch-level checkpoint after every batch (if running under a job).
+      // Merge into the existing checkpoint so completedSteps set by run-from-job.js
+      // are preserved — only update the enrichment-specific fields.
+      if (JOB_ID_ARG) {
+        const existing = loadCheckpoint(JOB_ID_ARG) ?? {};
+        saveCheckpoint(JOB_ID_ARG, {
+          ...existing,
+          step: "enrichment",
+          enrichmentStartBatch: batchIndex + 1,
+          enrichedPath: `data/enriched/${enrichedFilename}`,
+          recordsTotal: toProcess.length,
+          recordsProcessed: processed,
+          lastProcessedIndex: Math.min(i + BATCH_SIZE - 1, toProcess.length - 1),
+        });
+        log(`  ── Checkpoint saved (next resume will start at batch ${batchIndex + 1})`);
+      }
     }
 
     const totalElapsed = ((Date.now() - runStart) / 1000).toFixed(1);
 
+    // Final write (covers the case where the last batch was also the only batch)
     fs.writeFileSync(enrichedPath, stringifyCSV(outHeaders, rows));
 
     const cacheStats = domainCache.getCacheStats();

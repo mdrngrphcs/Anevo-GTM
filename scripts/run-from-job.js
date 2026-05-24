@@ -1,16 +1,22 @@
 "use strict";
 
 /**
- * Alternate pipeline entry-point for the web UI.
+ * Pipeline entry-point for the web UI.
  * Takes a jobId as the first argument — the job JSON must already exist
- * in jobs/queued/. Runs steps 2-5 (pull → validate → enrich → QA).
+ * in jobs/queued/ (new run) or jobs/completed/ / jobs/failed/ (resume).
  *
- * Usage: node scripts/run-from-job.js <jobId>
+ * Checkpoint behaviour
+ * ─────────────────────
+ * On start   : loads jobs/checkpoints/{jobId}.json if it exists
+ * Each step  : skips if listed in checkpoint.completedSteps
+ * On failure : saves checkpoint, logs "Run again to resume from checkpoint"
+ * On success : clears checkpoint
  */
 
 const path = require("path");
 const fs = require("fs");
 const { spawnSync } = require("child_process");
+const { saveCheckpoint, loadCheckpoint, clearCheckpoint } = require("./utils/checkpoint");
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
 const ROOT = path.resolve(__dirname, "..");
@@ -20,6 +26,10 @@ const PULL_SCRIPTS = {
   aiark:  "scripts/aiark/aiark-pull.js",
 };
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
 let pipelineLogPath = null;
 
 function log(pipelineId, message) {
@@ -28,6 +38,22 @@ function log(pipelineId, message) {
   console.log(line);
   if (pipelineLogPath) fs.appendFileSync(pipelineLogPath, line + "\n");
 }
+
+// ---------------------------------------------------------------------------
+// Job lookup — searches queued → processing → completed → failed
+// ---------------------------------------------------------------------------
+
+function findJobAnywhere(jobId) {
+  for (const dir of ["queued", "processing", "completed", "failed"]) {
+    const p = path.join(ROOT, "jobs", dir, `${jobId}.json`);
+    if (fs.existsSync(p)) return { job: JSON.parse(fs.readFileSync(p, "utf8")), dir };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Step runner
+// ---------------------------------------------------------------------------
 
 function runStep(label, scriptPath, pipelineId, args = []) {
   const divider = "─".repeat(52);
@@ -51,6 +77,10 @@ function runStep(label, scriptPath, pipelineId, args = []) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 function main() {
   const jobId = process.argv[2];
   if (!jobId) {
@@ -58,23 +88,36 @@ function main() {
     process.exit(1);
   }
 
-  const jobPath = path.join(ROOT, "jobs/queued", `${jobId}.json`);
-  if (!fs.existsSync(jobPath)) {
-    console.error(`Job not found in jobs/queued/: ${jobId}`);
+  const found = findJobAnywhere(jobId);
+  if (!found) {
+    console.error(`Job not found in any jobs/ directory: ${jobId}`);
     process.exit(1);
   }
+  const { job } = found;
 
-  const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
   const pipelineId = `pipeline_${Date.now()}`;
   const logDir = path.join(ROOT, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   pipelineLogPath = path.join(logDir, `pipeline-${new Date().toISOString().slice(0, 10)}.log`);
 
+  // ── Checkpoint: load or initialise ────────────────────────────────────────
+  let checkpoint = loadCheckpoint(jobId);
+  const isResume = checkpoint !== null;
+
+  if (isResume) {
+    log(pipelineId, `♻  Checkpoint found — resuming from step "${checkpoint.failedStep ?? "unknown"}"`);
+    if (checkpoint.enrichmentStartBatch > 0) {
+      log(pipelineId, `   Enrichment will resume from batch ${checkpoint.enrichmentStartBatch}`);
+    }
+  } else {
+    checkpoint = { jobId, completedSteps: [], enrichmentStartBatch: 0 };
+  }
+
   const divider = "═".repeat(52);
   const header = [
     "",
     divider,
-    "  ANEVO-GTM PIPELINE (from job)",
+    isResume ? "  ANEVO-GTM PIPELINE (resuming from checkpoint)" : "  ANEVO-GTM PIPELINE (from job)",
     divider,
     `  Job ID  : ${jobId}`,
     `  Client  : ${job.clientName}`,
@@ -95,10 +138,61 @@ function main() {
     process.exit(1);
   }
 
-  if (!runStep(`Step 2 / Pull [${job.source}]`, pullScript, pipelineId, [job.jobId])) process.exit(1);
-  if (!runStep("Step 3 / Email Validation", "scripts/apollo/email-validation.js", pipelineId)) process.exit(1);
-  if (!runStep("Step 4 / AI Enrichment",    "scripts/apollo/ai-enrichment.js",    pipelineId)) process.exit(1);
-  if (!runStep("Step 5 / QA Flagging",      "scripts/apollo/qa-flagging.js",      pipelineId)) process.exit(1);
+  // Helper: run a step with checkpoint skip/save/fail handling
+  function runCheckedStep(stepKey, label, scriptPath, args = []) {
+    if (checkpoint.completedSteps.includes(stepKey)) {
+      log(pipelineId, `↩  ${label} — skipped (already completed in prior run)`);
+      return true;
+    }
+
+    const ok = runStep(label, scriptPath, pipelineId, args);
+
+    if (!ok) {
+      checkpoint.failedStep = stepKey;
+      saveCheckpoint(jobId, checkpoint);
+      log(pipelineId, `💾 Checkpoint saved at step "${stepKey}"`);
+      log(pipelineId, `   Completed steps: [${checkpoint.completedSteps.join(", ") || "none"}]`);
+      log(pipelineId, `   Run again to resume from checkpoint`);
+      return false;
+    }
+
+    checkpoint.completedSteps.push(stepKey);
+    delete checkpoint.failedStep;
+    saveCheckpoint(jobId, checkpoint);
+    return true;
+  }
+
+  // ── Step 2: Pull ──────────────────────────────────────────────────────────
+  if (!runCheckedStep(`pull_${job.source}`, `Step 2 / Pull [${job.source}]`, pullScript, [jobId])) {
+    process.exit(1);
+  }
+
+  // ── Step 3: Email Validation ──────────────────────────────────────────────
+  if (!runCheckedStep("email_validation", "Step 3 / Email Validation", "scripts/apollo/email-validation.js")) {
+    process.exit(1);
+  }
+
+  // ── Step 4: AI Enrichment ─────────────────────────────────────────────────
+  // Pass --job-id so enrichment processes only this job's file.
+  // Pass --start-batch on resume to skip already-completed batches.
+  const enrichArgs = [`--job-id=${jobId}`];
+  if (checkpoint.enrichmentStartBatch > 0) {
+    enrichArgs.push(`--start-batch=${checkpoint.enrichmentStartBatch}`);
+    log(pipelineId, `   Enrichment resuming from batch ${checkpoint.enrichmentStartBatch}`);
+  }
+
+  if (!runCheckedStep("enrichment", "Step 4 / AI Enrichment", "scripts/apollo/ai-enrichment.js", enrichArgs)) {
+    process.exit(1);
+  }
+
+  // ── Step 5: QA Flagging ───────────────────────────────────────────────────
+  if (!runCheckedStep("qa_flagging", "Step 5 / QA Flagging", "scripts/apollo/qa-flagging.js")) {
+    process.exit(1);
+  }
+
+  // ── Success: clear checkpoint ─────────────────────────────────────────────
+  clearCheckpoint(jobId);
+  log(pipelineId, "✓  Checkpoint cleared");
 
   const summary = [
     "",

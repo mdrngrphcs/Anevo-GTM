@@ -39,6 +39,10 @@ app/node_modules/
 jobs/pending/*
 !jobs/pending/.gitkeep
 
+# Checkpoints — runtime resume state, never committed
+jobs/checkpoints/*
+!jobs/checkpoints/.gitkeep
+
 # Domain cache — stays local, never committed
 config/domain-cache.json
 
