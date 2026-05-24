@@ -39,6 +39,9 @@ app/node_modules/
 jobs/pending/*
 !jobs/pending/.gitkeep
 
+# Domain cache — stays local, never committed
+config/domain-cache.json
+
 # OS
 .DS_Store
 Thumbs.db

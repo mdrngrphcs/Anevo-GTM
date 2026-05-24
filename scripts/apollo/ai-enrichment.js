@@ -10,6 +10,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 const ROOT = path.resolve(__dirname, "../..");
 const BATCH_SIZE = 5;
 const BATCH_DELAY_MS = 1000;
+const domainCache = require("../utils/domain-cache");
 
 // ---------------------------------------------------------------------------
 // Clients
@@ -224,11 +225,19 @@ async function enrichDecisionMakers(row, decisionMakerContext) {
 async function enrichRecord(row, enrichments, icpCriteria, icpContext, businessTypeTemplate, decisionMakerCtx) {
   const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
 
-  // 1. Website Summary
+  // 1. Website Summary (domain cache → API fallback)
   if (enrichments.websiteSummary) {
     try {
-      row.website_summary = await enrichWebsiteSummary(row);
-      log(`     [${label}] website_summary: ${row.website_summary.slice(0, 80)}…`);
+      const cached = domainCache.getCachedSummary(row.company_website);
+      if (cached) {
+        row.website_summary = cached;
+        const domain = domainCache.normalizeDomain(row.company_website);
+        log(`     [${label}] website_summary: cache hit (${domain})`);
+      } else {
+        row.website_summary = await enrichWebsiteSummary(row);
+        domainCache.saveSummary(row.company_website, row.website_summary);
+        log(`     [${label}] website_summary: ${row.website_summary.slice(0, 80)}…`);
+      }
     } catch (err) {
       row.website_summary = "error";
       log(`     [${label}] website_summary ERROR: ${err.message}`);
@@ -376,11 +385,15 @@ async function main() {
 
     fs.writeFileSync(enrichedPath, stringifyCSV(outHeaders, rows));
 
+    const cacheStats = domainCache.getCacheStats();
     log(`━━━ Done: ${filename}`);
-    log(`    Enriched  : ${processed}`);
-    log(`    Skipped   : ${skipped}`);
-    log(`    Total time: ${totalElapsed}s`);
-    log(`    Saved to  : data/enriched/${enrichedFilename}`);
+    log(`    Enriched   : ${processed}`);
+    log(`    Skipped    : ${skipped}`);
+    log(`    Total time : ${totalElapsed}s`);
+    log(`    Cache hits : ${cacheStats.hits} (${cacheStats.estimatedSaved} saved)`);
+    log(`    Cache misses: ${cacheStats.misses} (new API calls)`);
+    log(`    Cached domains: ${cacheStats.totalCached} total in cache`);
+    log(`    Saved to   : data/enriched/${enrichedFilename}`);
   }
 }
 
