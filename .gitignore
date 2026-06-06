@@ -33,7 +33,9 @@ npm-debug.log*
 
 # Next.js
 app/.next/
+app/out/
 app/node_modules/
+app/tsconfig.tsbuildinfo
 
 # Pending job configs
 jobs/pending/*
