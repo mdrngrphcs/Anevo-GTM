@@ -10,7 +10,6 @@ const ROOT = path.resolve(__dirname, "..");
 
 const PULL_SCRIPTS = {
   apollo: "scripts/apollo/apollo-pull.js",
-  aiark:  "scripts/aiark/aiark-pull.js",
 };
 
 // ---------------------------------------------------------------------------
@@ -160,22 +159,23 @@ function main() {
     process.exit(1);
   }
 
-  if (!runStep(`Step 2 / Pull [${job.source}]`, pullScript, pipelineId, [job.jobId])) {
+  // Steps 2–3 run inside apollo-pull.js: people search (free) then email enrichment (credits)
+  if (!runStep(`Step 2-3 / Apollo Search + Email Enrichment`, pullScript, pipelineId, [job.jobId])) {
     process.exit(1);
   }
 
-  // ── Step 3: Email Validation ─────────────────────────────────────────────
-  if (!runStep("Step 3 / Email Validation", "scripts/apollo/email-validation.js", pipelineId)) {
+  // ── Step 4: Email Validation ─────────────────────────────────────────────
+  if (!runStep("Step 4 / Email Validation", "scripts/apollo/email-validation.js", pipelineId)) {
     process.exit(1);
   }
 
-  // ── Step 4: AI Enrichment ────────────────────────────────────────────────
-  if (!runStep("Step 4 / AI Enrichment", "scripts/apollo/ai-enrichment.js", pipelineId)) {
+  // ── Step 5: AI Enrichment ────────────────────────────────────────────────
+  if (!runStep("Step 5 / AI Enrichment", "scripts/apollo/ai-enrichment.js", pipelineId)) {
     process.exit(1);
   }
 
-  // ── Step 5: QA Flagging ──────────────────────────────────────────────────
-  if (!runStep("Step 5 / QA Flagging", "scripts/apollo/qa-flagging.js", pipelineId)) {
+  // ── Step 6: QA Flagging ──────────────────────────────────────────────────
+  if (!runStep("Step 6 / QA Flagging", "scripts/apollo/qa-flagging.js", pipelineId)) {
     process.exit(1);
   }
 

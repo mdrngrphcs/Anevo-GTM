@@ -7,7 +7,6 @@ import IndustrySelect from "./IndustrySelect";
 interface FormState {
   clientName: string;
   listName: string;
-  source: "aiark" | "apollo" | "both";
   recordLimitMode: "all" | "limit";
   recordLimitValue: string;
   titles: string[];
@@ -34,7 +33,6 @@ interface FormState {
 const DEFAULT: FormState = {
   clientName: "",
   listName: "",
-  source: "aiark",
   recordLimitMode: "all",
   recordLimitValue: "",
   titles: [],
@@ -90,8 +88,56 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
 
+  type PreviewResult = { count: number | null; error?: string };
+  const [preview, setPreview] = useState<{ apollo?: PreviewResult; aiark?: PreviewResult } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  // Fields whose changes invalidate the current preview count
+  const ICP_FIELDS = new Set<keyof FormState>([
+    "titles", "industriesInclude", "industriesExclude",
+    "companyKeywordsInclude", "companyKeywordsExclude", "locations",
+    "technologies", "headcountMin", "headcountMax", "revenueMin", "revenueMax",
+  ]);
+
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
+    if (ICP_FIELDS.has(key)) setPreview(null);
+  }
+
+  async function handlePreview() {
+    setPreviewing(true);
+    setPreview(null);
+    try {
+      const res = await fetch("/api/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "apollo",
+          icp: {
+            titles: form.titles,
+            industries: form.industriesInclude,
+            companyKeywords: form.companyKeywordsInclude,
+            location: form.locations,
+            technologies: form.technologies,
+            headcount: {
+              min: form.headcountMin ? parseInt(form.headcountMin) : null,
+              max: form.headcountMax ? parseInt(form.headcountMax) : null,
+            },
+            revenue: {
+              min: form.revenueMin ? parseInt(form.revenueMin) : null,
+              max: form.revenueMax ? parseInt(form.revenueMax) : null,
+            },
+          },
+        }),
+      });
+      const data = await res.json();
+      setPreview(data);
+    } catch (err) {
+      console.error("[Preview] fetch error:", err);
+      setPreview({ apollo: { count: null, error: "Preview unavailable — you can still place order" } });
+    } finally {
+      setPreviewing(false);
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -106,7 +152,7 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
         body: JSON.stringify({
           clientName: form.clientName.trim(),
           listName: form.listName.trim(),
-          source: form.source,
+          source: "apollo",
           icp: {
             titles: form.titles,
             industries: form.industriesInclude,
@@ -150,8 +196,10 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
       } else {
         setResult({ ok: false, message: data.error ?? "Failed to place order" });
       }
-    } catch {
-      setResult({ ok: false, message: "Network error — could not reach server" });
+    } catch (err) {
+      console.error("[Place Order] fetch error:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setResult({ ok: false, message: `Network error — ${msg}` });
     } finally {
       setSubmitting(false);
     }
@@ -184,27 +232,6 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
               placeholder="Q3_Toronto_CROs"
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
             />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Data Source</label>
-          <div className="flex gap-3">
-            {(["aiark", "apollo", "both"] as const).map((s) => (
-              <label key={s} className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="source"
-                  value={s}
-                  checked={form.source === s}
-                  onChange={() => set("source", s)}
-                  className="accent-gray-900"
-                />
-                <span className="text-sm">
-                  {s === "aiark" ? "AI Ark" : s === "apollo" ? "Apollo" : "Both"}
-                </span>
-              </label>
-            ))}
           </div>
         </div>
 
@@ -360,6 +387,40 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
           />
         </div>
       </section>
+
+      {/* Preview Results */}
+      <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          onClick={handlePreview}
+          disabled={previewing}
+          className="w-full border border-gray-300 text-gray-700 py-2.5 rounded-xl font-medium text-sm hover:bg-gray-50 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+        >
+          {previewing ? (
+            <>
+              <svg className="animate-spin h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Checking…
+            </>
+          ) : "Preview Results"}
+        </button>
+
+        {preview && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            {preview.apollo && (
+              <p className={`text-sm ${preview.apollo.error && preview.apollo.count === null ? "text-amber-700" : preview.apollo.count === 0 ? "text-gray-500" : "text-gray-800"}`}>
+                {preview.apollo.error && preview.apollo.count === null
+                  ? preview.apollo.error
+                  : preview.apollo.count === 0
+                  ? "No matching records found — try broader filters"
+                  : `Apollo estimates ${preview.apollo.count!.toLocaleString()} matching records`}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Enrichments */}
       <section className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">

@@ -27,18 +27,26 @@ function spawnPipeline(jobId: string) {
   child.unref();
 }
 
+// Strip characters that are unsafe in filenames (slashes, brackets, parens, etc.)
+function toSlug(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, "") // remove anything that isn't alphanumeric, space, _ or -
+    .replace(/\s+/g, "_")           // spaces → underscores
+    .replace(/_+/g, "_")            // collapse consecutive underscores
+    .replace(/^_+|_+$/g, "");       // trim leading/trailing underscores
+}
+
 function buildJobId(clientName: string, listName: string, ts: number): string {
-  const clientSlug = clientName.trim().toLowerCase().replace(/\s+/g, "_");
-  const listSlug = listName.trim().toLowerCase().replace(/\s+/g, "_");
-  return `${clientSlug}_${listSlug}_${ts}`;
+  return `${toSlug(clientName)}_${toSlug(listName)}_${ts}`;
 }
 
 function buildOutputFilename(clientName: string, source: string, date: Date): string {
-  const slug = clientName.trim().toLowerCase().replace(/\s+/g, "_");
   const m = date.getMonth() + 1;
   const d = date.getDate();
   const y = String(date.getFullYear()).slice(-2);
-  return `${slug}_${source}_raw_${m}_${d}_${y}.csv`;
+  return `${toSlug(clientName)}_${source}_raw_${m}_${d}_${y}.csv`;
 }
 
 function readJobsFromDir(dirName: string) {
@@ -94,76 +102,61 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { clientName, listName, source, icp, enrichments, outputDestination, recordLimit } = body;
+  const { clientName, listName, icp, enrichments, outputDestination, recordLimit } = body;
 
   if (!clientName?.trim() || !listName?.trim()) {
     return NextResponse.json({ error: "clientName and listName are required" }, { status: 400 });
   }
 
-  const validSources = ["aiark", "apollo", "both"];
-  if (!validSources.includes(source)) {
-    return NextResponse.json({ error: `source must be one of: ${validSources.join(", ")}` }, { status: 400 });
-  }
+  const now = new Date();
+  const ts = now.getTime();
+  const jobId = buildJobId(clientName, listName, ts);
+  const outputFilename = buildOutputFilename(clientName, "apollo", now);
 
-  const sources: string[] = source === "both" ? ["aiark", "apollo"] : [source];
-  const jobIds: string[] = [];
-
-  for (const src of sources) {
-    const now = new Date();
-    const ts = now.getTime();
-    const jobId = buildJobId(clientName, listName + (source === "both" ? `_${src}` : ""), ts);
-    const outputFilename = buildOutputFilename(clientName, src, now);
-
-    const job = {
-      jobId,
-      createdAt: now.toISOString(),
-      status: "queued",
-      clientName: clientName.trim(),
-      listName: (listName + (source === "both" ? `_${src}` : "")).trim(),
-      source: src,
-      icp: {
-        titles: icp?.titles ?? [],
-        industries: icp?.industries ?? [],
-        industriesExclude: icp?.industriesExclude ?? [],
-        companyKeywords: icp?.companyKeywords ?? [],
-        companyKeywordsExclude: icp?.companyKeywordsExclude ?? [],
-        headcount: {
-          min: icp?.headcount?.min ?? null,
-          max: icp?.headcount?.max ?? null,
-        },
-        location: icp?.location ?? [],
-        revenue: {
-          min: icp?.revenue?.min ?? null,
-          max: icp?.revenue?.max ?? null,
-        },
-        technologies: icp?.technologies ?? [],
-        additionalCriteria: icp?.additionalCriteria ?? "",
+  const job = {
+    jobId,
+    createdAt: now.toISOString(),
+    status: "queued",
+    clientName: clientName.trim(),
+    listName: listName.trim(),
+    source: "apollo",
+    icp: {
+      titles: icp?.titles ?? [],
+      industries: icp?.industries ?? [],
+      industriesExclude: icp?.industriesExclude ?? [],
+      companyKeywords: icp?.companyKeywords ?? [],
+      companyKeywordsExclude: icp?.companyKeywordsExclude ?? [],
+      headcount: {
+        min: icp?.headcount?.min ?? null,
+        max: icp?.headcount?.max ?? null,
       },
-      enrichments: {
-        websiteSummary: enrichments?.websiteSummary ?? false,
-        icpClassification: enrichments?.icpClassification ?? false,
-        icpClassificationContext: enrichments?.icpClassificationContext ?? "",
-        businessLabeling: enrichments?.businessLabeling ?? false,
-        businessTypeLabelTemplate: enrichments?.businessTypeLabelTemplate ?? "",
-        decisionMakerDiscovery: enrichments?.decisionMakerDiscovery ?? false,
-        decisionMakerContext: enrichments?.decisionMakerContext ?? "",
+      location: icp?.location ?? [],
+      revenue: {
+        min: icp?.revenue?.min ?? null,
+        max: icp?.revenue?.max ?? null,
       },
-      recordLimit: typeof recordLimit === "number" && recordLimit > 0 ? recordLimit : null,
-      outputDestination: outputDestination ?? "data/final",
-      outputFilename,
-    };
+      technologies: icp?.technologies ?? [],
+      additionalCriteria: icp?.additionalCriteria ?? "",
+    },
+    enrichments: {
+      websiteSummary: enrichments?.websiteSummary ?? false,
+      icpClassification: enrichments?.icpClassification ?? false,
+      icpClassificationContext: enrichments?.icpClassificationContext ?? "",
+      businessLabeling: enrichments?.businessLabeling ?? false,
+      businessTypeLabelTemplate: enrichments?.businessTypeLabelTemplate ?? "",
+      decisionMakerDiscovery: enrichments?.decisionMakerDiscovery ?? false,
+      decisionMakerContext: enrichments?.decisionMakerContext ?? "",
+    },
+    recordLimit: typeof recordLimit === "number" && recordLimit > 0 ? recordLimit : null,
+    outputDestination: outputDestination ?? "data/final",
+    outputFilename,
+  };
 
-    const queuedDir = path.join(PIPELINE_ROOT, "jobs", "queued");
-    fs.mkdirSync(queuedDir, { recursive: true });
-    fs.writeFileSync(path.join(queuedDir, `${jobId}.json`), JSON.stringify(job, null, 2));
+  const queuedDir = path.join(PIPELINE_ROOT, "jobs", "queued");
+  fs.mkdirSync(queuedDir, { recursive: true });
+  fs.writeFileSync(path.join(queuedDir, `${jobId}.json`), JSON.stringify(job, null, 2));
 
-    spawnPipeline(jobId);
+  spawnPipeline(jobId);
 
-    jobIds.push(jobId);
-  }
-
-  return NextResponse.json(
-    { jobId: jobIds.length === 1 ? jobIds[0] : jobIds, message: "Pipeline started" },
-    { status: 201 }
-  );
+  return NextResponse.json({ jobId, message: "Pipeline started" }, { status: 201 });
 }

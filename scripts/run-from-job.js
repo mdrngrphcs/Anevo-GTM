@@ -23,7 +23,6 @@ const ROOT = path.resolve(__dirname, "..");
 
 const PULL_SCRIPTS = {
   apollo: "scripts/apollo/apollo-pull.js",
-  aiark:  "scripts/aiark/aiark-pull.js",
 };
 
 // ---------------------------------------------------------------------------
@@ -162,31 +161,30 @@ function main() {
     return true;
   }
 
-  // ── Step 2: Pull ──────────────────────────────────────────────────────────
-  if (!runCheckedStep(`pull_${job.source}`, `Step 2 / Pull [${job.source}]`, pullScript, [jobId])) {
+  // ── Steps 2–3: Apollo Search + Email Enrichment ──────────────────────────
+  // apollo-pull.js runs both internally: people search (free) then bulk_match (credits)
+  if (!runCheckedStep(`pull_${job.source}`, `Step 2-3 / Apollo Search + Email Enrichment`, pullScript, [jobId])) {
     process.exit(1);
   }
 
-  // ── Step 3: Email Validation ──────────────────────────────────────────────
-  if (!runCheckedStep("email_validation", "Step 3 / Email Validation", "scripts/apollo/email-validation.js")) {
+  // ── Step 4: Email Validation ──────────────────────────────────────────────
+  if (!runCheckedStep("email_validation", "Step 4 / Email Validation", "scripts/apollo/email-validation.js")) {
     process.exit(1);
   }
 
-  // ── Step 4: AI Enrichment ─────────────────────────────────────────────────
-  // Pass --job-id so enrichment processes only this job's file.
-  // Pass --start-batch on resume to skip already-completed batches.
+  // ── Step 5: AI Enrichment ─────────────────────────────────────────────────
   const enrichArgs = [`--job-id=${jobId}`];
   if (checkpoint.enrichmentStartBatch > 0) {
     enrichArgs.push(`--start-batch=${checkpoint.enrichmentStartBatch}`);
     log(pipelineId, `   Enrichment resuming from batch ${checkpoint.enrichmentStartBatch}`);
   }
 
-  if (!runCheckedStep("enrichment", "Step 4 / AI Enrichment", "scripts/apollo/ai-enrichment.js", enrichArgs)) {
+  if (!runCheckedStep("enrichment", "Step 5 / AI Enrichment", "scripts/apollo/ai-enrichment.js", enrichArgs)) {
     process.exit(1);
   }
 
-  // ── Step 5: QA Flagging ───────────────────────────────────────────────────
-  if (!runCheckedStep("qa_flagging", "Step 5 / QA Flagging", "scripts/apollo/qa-flagging.js")) {
+  // ── Step 6: QA Flagging ───────────────────────────────────────────────────
+  if (!runCheckedStep("qa_flagging", "Step 6 / QA Flagging", "scripts/apollo/qa-flagging.js")) {
     process.exit(1);
   }
 

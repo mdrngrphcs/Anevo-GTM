@@ -6,13 +6,14 @@ const axios = require("axios");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
 const ROOT = path.resolve(__dirname, "../..");
-const APOLLO_ENDPOINT = "https://api.apollo.io/v1/mixed_people/api_search";
+const SEARCH_ENDPOINT     = "https://api.apollo.io/v1/mixed_people/api_search";
+const BULK_MATCH_ENDPOINT = "https://api.apollo.io/v1/people/bulk_match";
+const BULK_MATCH_BATCH    = 10; // Apollo bulk_match max per call
 
 // ---------------------------------------------------------------------------
-// Apollo filter mappings
+// Filter translation
 // ---------------------------------------------------------------------------
 
-// Apollo headcount buckets — filter to whichever overlap [min, max]
 const HEADCOUNT_BUCKETS = [
   [1, 10], [11, 20], [21, 50], [51, 100], [101, 200],
   [201, 500], [501, 1000], [1001, 2000], [2001, 5000],
@@ -27,36 +28,7 @@ function headcountToRanges(min, max) {
     .map(([bLo, bHi]) => `${bLo},${bHi}`);
 }
 
-// Apollo industry tag IDs (partial — extend as needed)
-const INDUSTRY_TAG_MAP = {
-  "accounting": 5567, "advertising": 5568, "aerospace": 5569,
-  "agriculture": 5570, "automotive": 5573, "banking": 5575,
-  "biotechnology": 5577, "cloud computing": 5579,
-  "computer software": 5582, "construction": 5583,
-  "consumer electronics": 5584, "cybersecurity": 6778,
-  "e-commerce": 5594, "education": 5595, "energy": 5596,
-  "engineering": 5597, "environmental": 5598,
-  "financial services": 5601, "food & beverage": 5602,
-  "government": 5605, "healthcare": 5607,
-  "human resources": 5610, "information technology": 5614,
-  "insurance": 5615, "internet": 5617, "legal services": 5620,
-  "logistics": 5622, "management consulting": 5624,
-  "manufacturing": 5625, "marketing": 5626, "media": 5628,
-  "medical devices": 5629, "non-profit": 5633,
-  "oil & gas": 5634, "pharmaceuticals": 5637,
-  "real estate": 5641, "retail": 5643, "saas": 5645,
-  "software": 5582, "staffing": 5649,
-  "telecommunications": 5653, "transportation": 5654,
-  "venture capital": 5657, "wholesale": 5659,
-};
-
-function industriesToTagIds(industries) {
-  // Return all as unmapped keywords — Apollo tag IDs are account-specific
-  // and the /mixed_people/api_search endpoint rejects unrecognised IDs.
-  return { ids: [], unmapped: industries };
-}
-
-// Apollo technology UIDs (slug-based — extend as needed)
+// Apollo technology UIDs (slug-based)
 const TECHNOLOGY_UID_MAP = {
   "salesforce": "salesforce", "hubspot": "hubspot",
   "outreach": "outreach", "salesloft": "salesloft",
@@ -73,42 +45,30 @@ const TECHNOLOGY_UID_MAP = {
   "gong": "gong", "chorus": "chorus",
 };
 
-function technologiesToUids(technologies) {
-  return technologies
-    .map((t) => TECHNOLOGY_UID_MAP[t.toLowerCase()])
-    .filter(Boolean);
-}
-
-// ---------------------------------------------------------------------------
-// Translate job ICP → Apollo API payload
-// ---------------------------------------------------------------------------
-
 function translateFilters(icp) {
   const params = {};
 
-  if (icp.titles?.length) params.person_titles = icp.titles;
-  if (icp.location?.length) params.person_locations = icp.location;
-  if (icp.companyKeywords?.length) params.q_organization_keyword_tags = icp.companyKeywords;
+  if (icp.titles?.length)          params.person_titles = icp.titles;
+  if (icp.location?.length)        params.person_locations = icp.location;
 
-  if (icp.industries?.length) {
-    const { ids, unmapped } = industriesToTagIds(icp.industries);
-    if (ids.length) params.organization_industry_tag_ids = ids;
-    if (unmapped.length) {
-      params.q_organization_keyword_tags = [
-        ...(params.q_organization_keyword_tags || []),
-        ...unmapped,
-      ];
-    }
-  }
+  // Keywords and industries are both passed as keyword tags (industry tag IDs
+  // are account-specific and rejected by the API if unrecognised)
+  const keywords = [
+    ...(icp.companyKeywords ?? []),
+    ...(icp.industries ?? []),
+  ];
+  if (keywords.length)             params.q_organization_keyword_tags = keywords;
 
   if (icp.headcount?.min != null || icp.headcount?.max != null) {
     const ranges = headcountToRanges(icp.headcount.min, icp.headcount.max);
-    if (ranges.length) params.organization_num_employees_ranges = ranges;
+    if (ranges.length)             params.organization_num_employees_ranges = ranges;
   }
 
   if (icp.technologies?.length) {
-    const uids = technologiesToUids(icp.technologies);
-    if (uids.length) params.currently_using_any_of_technology_uids = uids;
+    const uids = icp.technologies
+      .map((t) => TECHNOLOGY_UID_MAP[t.toLowerCase()])
+      .filter(Boolean);
+    if (uids.length)               params.currently_using_any_of_technology_uids = uids;
   }
 
   return params;
@@ -125,7 +85,6 @@ function loadQueuedJob(jobId) {
     if (!fs.existsSync(jobPath)) throw new Error(`Job not found in jobs/queued/: ${jobId}`);
     return { job: JSON.parse(fs.readFileSync(jobPath, "utf8")), filePath: jobPath };
   }
-  // fallback: oldest queued job
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
   if (!files.length) throw new Error("No queued jobs found in jobs/queued/");
   const jobPath = path.join(dir, files[0]);
@@ -134,9 +93,9 @@ function loadQueuedJob(jobId) {
 
 function moveJob(job, fromStatus, toStatus) {
   const fromPath = path.join(ROOT, `jobs/${fromStatus}`, `${job.jobId}.json`);
-  const toPath = path.join(ROOT, `jobs/${toStatus}`, `${job.jobId}.json`);
+  const toPath   = path.join(ROOT, `jobs/${toStatus}`,   `${job.jobId}.json`);
   job.status = toStatus;
-  if (toStatus === "processing") job.startedAt = new Date().toISOString();
+  if (toStatus === "processing") job.startedAt  = new Date().toISOString();
   if (toStatus === "completed" || toStatus === "failed") job.endedAt = new Date().toISOString();
   fs.mkdirSync(path.dirname(toPath), { recursive: true });
   fs.writeFileSync(toPath, JSON.stringify(job, null, 2));
@@ -170,6 +129,16 @@ const CSV_COLUMNS = [
   "industry", "headcount", "city", "state", "country",
 ];
 
+function extractDomain(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return url.replace(/^https?:\/\//i, "").replace(/^www\./i, "").split("/")[0];
+  }
+}
+
 function escapeCell(val) {
   if (val == null) return "";
   const s = String(val);
@@ -182,13 +151,24 @@ function recordsToCsv(records) {
   const header = CSV_COLUMNS.join(",");
   const rows = records.map((p) => {
     const org = p.organization || {};
-    const phone = p.phone_numbers?.[0]?.sanitized_number || "";
+    // Phone: prefer enriched value from bulk_match, fall back to search result
+    const phone = p._phone || p.phone_numbers?.[0]?.sanitized_number || "";
     return [
-      p.first_name, p.last_name, p.title,
-      p.email, p.email_status, phone, p.linkedin_url,
-      org.name, org.website_url, org.linkedin_url,
-      org.industry, org.estimated_num_employees,
-      p.city, p.state, p.country,
+      p.first_name,
+      p.last_name,
+      p.title,
+      p.email        || "",
+      p.email_status || "",
+      phone,
+      p.linkedin_url || "",
+      org.name,
+      org.website_url,
+      org.linkedin_url,
+      org.industry,
+      org.estimated_num_employees,
+      p.city,
+      p.state,
+      p.country,
     ].map(escapeCell).join(",");
   });
   return [header, ...rows].join("\n");
@@ -230,64 +210,139 @@ async function main() {
     "X-Api-Key": apiKey,
   };
 
+  // ── Step 1: People Search (no credits) ────────────────────────────────────
+
+  log(jobId, "Step 1 — People Search (no credits, POST /v1/mixed_people/search)…");
+  const step1Start = Date.now();
+
   const PER_PAGE = recordLimit ? Math.min(recordLimit, 100) : 100;
-  let people = [];
+  const people = [];
   let page = 1;
   let totalEntries = null;
 
   try {
     while (true) {
-      const payload = {
-        page,
-        per_page: PER_PAGE,
-        reveal_personal_emails: true,
-        reveal_phone_number: true,
-        ...filters,
-      };
+      const payload = { page, per_page: PER_PAGE, ...filters };
 
-      log(jobId, `Fetching page ${page} (per_page=${PER_PAGE}) …`);
-      const { data } = await axios.post(APOLLO_ENDPOINT, payload, { headers: apolloHeaders });
+      log(jobId, `Step 1 — Fetching page ${page} (per_page=${PER_PAGE})…`);
+      const { data } = await axios.post(SEARCH_ENDPOINT, payload, {
+        headers: apolloHeaders,
+        timeout: 30000,
+      });
+
       const batch = data.people || [];
 
-      if (totalEntries === null) {
+      if (page === 1) {
         totalEntries = data.pagination?.total_entries ?? null;
-        log(jobId, `Total matching entries: ${totalEntries ?? "unknown"}`);
+        log(jobId, `Step 1 — Total matching entries: ${totalEntries ?? "unknown"}`);
       }
 
       people.push(...batch);
-      log(jobId, `Page ${page}: ${batch.length} record(s) — total so far: ${people.length}`);
+      log(jobId, `Step 1 — Page ${page}: ${batch.length} record(s) — total so far: ${people.length}`);
 
-      // Stop if we have enough records
       if (recordLimit && people.length >= recordLimit) {
-        people = people.slice(0, recordLimit);
-        log(jobId, `Record limit (${recordLimit}) reached — stopping pagination`);
+        people.splice(recordLimit);
+        log(jobId, `Step 1 — Record limit (${recordLimit}) reached — stopping pagination`);
         break;
       }
 
-      // Stop if this was the last page
       const totalPages = data.pagination?.total_pages ?? null;
-      if (batch.length < PER_PAGE || (totalPages && page >= totalPages)) {
-        break;
-      }
+      if (batch.length < PER_PAGE || (totalPages && page >= totalPages)) break;
 
       page++;
-      await sleep(1000); // respect Apollo rate limits between pages
+      await sleep(1000);
     }
   } catch (err) {
     const detail = err.response?.data ?? err.message;
-    log(jobId, `Apollo request failed: ${JSON.stringify(detail)}`);
+    log(jobId, `Step 1 — Failed: ${JSON.stringify(detail)}`);
     moveJob(job, "processing", "failed");
     log(jobId, "Status → failed");
     process.exit(1);
   }
 
-  log(jobId, `Pull complete — ${people.length} total record(s)`);
+  const step1Elapsed = ((Date.now() - step1Start) / 1000).toFixed(1);
+  log(jobId, `Step 1 — Complete: ${people.length} record(s) in ${step1Elapsed}s`);
+
+  // ── Step 2: Email Enrichment (1 credit per email found) ───────────────────
+  // Pass Apollo's internal person id — the free search returns id even though
+  // names/LinkedIn are blinded, and bulk_match accepts id for exact matching.
+
+  const totalBatches = Math.ceil(people.length / BULK_MATCH_BATCH);
+  log(jobId, `Step 2 — Email Enrichment (POST /v1/people/bulk_match): ${people.length} records → ${totalBatches} batch(es) of ${BULK_MATCH_BATCH}…`);
+  const step2Start = Date.now();
+
+  let emailsFound    = 0;
+  let emailsNotFound = 0;
+  let totalCredits   = 0;
+
+  for (let i = 0; i < people.length; i += BULK_MATCH_BATCH) {
+    const batch    = people.slice(i, i + BULK_MATCH_BATCH);
+    const batchNum = Math.floor(i / BULK_MATCH_BATCH) + 1;
+
+    const details = batch.map((p) => ({ id: p.id }));
+
+    try {
+      const { data } = await axios.post(
+        BULK_MATCH_ENDPOINT,
+        { reveal_personal_emails: true, details },
+        { headers: apolloHeaders, timeout: 30000 }
+      );
+
+      const matches    = data.matches || [];
+      const credits    = data.credits_consumed ?? 0;
+      totalCredits    += credits;
+      let batchFound   = 0;
+
+      for (let j = 0; j < batch.length; j++) {
+        const match = matches[j];
+        if (match) {
+          // Overwrite blinded fields with enriched values from bulk_match
+          if (match.last_name)    batch[j].last_name    = match.last_name;
+          if (match.linkedin_url) batch[j].linkedin_url = match.linkedin_url;
+          if (match.city)         batch[j].city         = match.city;
+          if (match.state)        batch[j].state        = match.state;
+          if (match.country)      batch[j].country      = match.country;
+          if (match.organization?.website_url) {
+            batch[j].organization = { ...(batch[j].organization || {}), ...match.organization };
+          }
+          if (match.email) {
+            batch[j].email        = match.email;
+            batch[j].email_status = match.email_status || "verified";
+            batchFound++;
+            emailsFound++;
+          } else {
+            emailsNotFound++;
+          }
+          if (!batch[j]._phone && match.phone_numbers?.length) {
+            batch[j]._phone = match.phone_numbers[0].sanitized_number;
+          }
+        } else {
+          emailsNotFound++;
+        }
+      }
+
+      log(jobId, `Step 2 — Batch ${batchNum}/${totalBatches}: ${batchFound}/${batch.length} emails found (credits used: ${credits})`);
+    } catch (err) {
+      const detail = err.response?.data ?? err.message;
+      log(jobId, `Step 2 — Batch ${batchNum}/${totalBatches} error (non-fatal): ${JSON.stringify(detail)}`);
+      emailsNotFound += batch.length;
+    }
+
+    // Pause between batches to stay within Apollo's rate limits
+    if (i + BULK_MATCH_BATCH < people.length) await sleep(1200);
+  }
+
+  const step2Elapsed = ((Date.now() - step2Start) / 1000).toFixed(1);
+  log(jobId, `Step 2 — Complete in ${step2Elapsed}s: ${emailsFound} emails found, ${emailsNotFound} not found, ${totalCredits} credits consumed`);
+
+  // ── Step 3: Save CSV ──────────────────────────────────────────────────────
 
   const rawDir = path.join(ROOT, "data/raw");
   fs.mkdirSync(rawDir, { recursive: true });
   const csvPath = path.join(rawDir, job.outputFilename);
   fs.writeFileSync(csvPath, recordsToCsv(people));
   log(jobId, `Saved ${people.length} record(s) → data/raw/${job.outputFilename}`);
+  log(jobId, `Email summary: ${emailsFound}/${people.length} emails found (${emailsNotFound} not found)`);
 
   moveJob(job, "processing", "completed");
   log(jobId, "Status → completed");
