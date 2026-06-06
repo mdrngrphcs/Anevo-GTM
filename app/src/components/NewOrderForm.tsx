@@ -88,8 +88,8 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  type PreviewResult = { count: number | null; error?: string };
-  const [preview, setPreview] = useState<{ apollo?: PreviewResult; aiark?: PreviewResult } | null>(null);
+  type PreviewResult = { count: number | null; source: string; error?: string };
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
 
   // Fields whose changes invalidate the current preview count
@@ -104,7 +104,25 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
     if (ICP_FIELDS.has(key)) setPreview(null);
   }
 
+  function hasFilters(): boolean {
+    return (
+      form.titles.length > 0 ||
+      form.industriesInclude.length > 0 ||
+      form.companyKeywordsInclude.length > 0 ||
+      form.locations.length > 0 ||
+      form.technologies.length > 0 ||
+      form.headcountMin !== "" ||
+      form.headcountMax !== "" ||
+      form.revenueMin !== "" ||
+      form.revenueMax !== ""
+    );
+  }
+
   async function handlePreview() {
+    if (!hasFilters()) {
+      setPreview({ count: null, source: "Apollo", error: "add_filters" });
+      return;
+    }
     setPreviewing(true);
     setPreview(null);
     try {
@@ -112,7 +130,6 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source: "apollo",
           icp: {
             titles: form.titles,
             industries: form.industriesInclude,
@@ -134,7 +151,7 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
       setPreview(data);
     } catch (err) {
       console.error("[Preview] fetch error:", err);
-      setPreview({ apollo: { count: null, error: "Preview unavailable — you can still place order" } });
+      setPreview({ count: null, source: "Apollo", error: "Preview unavailable — you can still place your order" });
     } finally {
       setPreviewing(false);
     }
@@ -407,19 +424,33 @@ export default function NewOrderForm({ onOrderPlaced }: NewOrderFormProps) {
           ) : "Preview Results"}
         </button>
 
-        {preview && (
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            {preview.apollo && (
-              <p className={`text-sm ${preview.apollo.error && preview.apollo.count === null ? "text-amber-700" : preview.apollo.count === 0 ? "text-gray-500" : "text-gray-800"}`}>
-                {preview.apollo.error && preview.apollo.count === null
-                  ? preview.apollo.error
-                  : preview.apollo.count === 0
-                  ? "No matching records found — try broader filters"
-                  : `Apollo estimates ${preview.apollo.count!.toLocaleString()} matching records`}
-              </p>
-            )}
-          </div>
-        )}
+        {preview && (() => {
+          const isAddFilters = preview.error === "add_filters";
+          const isError      = !isAddFilters && preview.count === null;
+          const isOver50k    = preview.count != null && preview.count > 50000;
+          const isEmpty      = preview.count === 0;
+          const isSuccess    = preview.count != null && preview.count > 0 && !isOver50k;
+
+          const containerClass = `rounded-lg border px-4 py-3 text-sm ${
+            isAddFilters || isError || isOver50k
+              ? "border-amber-200 bg-amber-50 text-amber-700"
+              : isEmpty
+              ? "border-gray-200 bg-gray-50 text-gray-500"
+              : "border-green-200 bg-green-50 text-green-800"
+          }`;
+
+          const message = isAddFilters
+            ? "Add filters before previewing"
+            : isError
+            ? (preview.error ?? "Preview unavailable — you can still place your order")
+            : isEmpty
+            ? "No matching records found — try broader filters"
+            : isOver50k
+            ? "50,000+ matching records — consider narrowing your filters"
+            : `Apollo estimates ${preview.count!.toLocaleString()} matching records`;
+
+          return <div className={containerClass}>{message}</div>;
+        })()}
       </div>
 
       {/* Enrichments */}

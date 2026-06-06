@@ -233,7 +233,8 @@ async function main() {
       const batch = data.people || [];
 
       if (page === 1) {
-        totalEntries = data.pagination?.total_entries ?? null;
+        // api_search returns total_entries at top level, not nested under pagination
+        totalEntries = data.total_entries ?? data.pagination?.total_entries ?? null;
         log(jobId, `Step 1 — Total matching entries: ${totalEntries ?? "unknown"}`);
       }
 
