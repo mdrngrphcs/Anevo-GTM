@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+const RAILWAY_URL     = process.env.RAILWAY_URL?.replace(/\/$/, "");
 const APOLLO_ENDPOINT = "https://api.apollo.io/v1/mixed_people/api_search";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,23 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (RAILWAY_URL) {
+    try {
+      const upstream = await fetch(`${RAILWAY_URL}/api/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      return NextResponse.json(await upstream.json(), { status: upstream.status });
+    } catch {
+      return NextResponse.json(
+        { count: null, source: "Apollo", error: "Preview unavailable — you can still place your order" },
+        { status: 200 }
+      );
+    }
   }
 
   const { icp } = body;

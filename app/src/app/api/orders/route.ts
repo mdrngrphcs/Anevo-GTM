@@ -5,6 +5,7 @@ import cp from "child_process";
 
 export const runtime = "nodejs";
 
+const RAILWAY_URL   = process.env.RAILWAY_URL?.replace(/\/$/, "");
 const PIPELINE_ROOT = path.resolve(process.cwd(), "..");
 
 function spawnPipeline(jobId: string) {
@@ -66,6 +67,17 @@ function readJobsFromDir(dirName: string) {
 }
 
 export async function GET(req: NextRequest) {
+  if (RAILWAY_URL) {
+    const status = req.nextUrl.searchParams.get("status");
+    const url = status ? `${RAILWAY_URL}/api/orders?status=${status}` : `${RAILWAY_URL}/api/orders`;
+    try {
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      return NextResponse.json(await upstream.json(), { status: upstream.status });
+    } catch {
+      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    }
+  }
+
   const status = req.nextUrl.searchParams.get("status");
 
   let orders: unknown[] = [];
@@ -100,6 +112,20 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (RAILWAY_URL) {
+    try {
+      const upstream = await fetch(`${RAILWAY_URL}/api/orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30000),
+      });
+      return NextResponse.json(await upstream.json(), { status: upstream.status });
+    } catch {
+      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    }
   }
 
   const { clientName, listName, icp, enrichments, outputDestination, recordLimit } = body;

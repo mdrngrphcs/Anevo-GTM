@@ -4,6 +4,8 @@ import path from "path";
 
 export const runtime = "nodejs";
 
+const RAILWAY_URL = process.env.RAILWAY_URL?.replace(/\/$/, "");
+
 const USAGE_LOG = path.resolve(process.cwd(), "../logs/usage-log.json");
 
 interface UsageEntry {
@@ -31,6 +33,15 @@ function readLog(): UsageEntry[] {
 }
 
 export async function GET() {
+  if (RAILWAY_URL) {
+    try {
+      const upstream = await fetch(`${RAILWAY_URL}/api/usage`, { signal: AbortSignal.timeout(15000) });
+      return NextResponse.json(await upstream.json(), { status: upstream.status });
+    } catch {
+      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    }
+  }
+
   const entries = readLog();
 
   const now = new Date();
