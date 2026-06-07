@@ -10,6 +10,8 @@ const SEARCH_ENDPOINT     = "https://api.apollo.io/v1/mixed_people/api_search";
 const BULK_MATCH_ENDPOINT = "https://api.apollo.io/v1/people/bulk_match";
 const BULK_MATCH_BATCH    = 10; // Apollo bulk_match max per call
 
+const { logApiCall } = require("../utils/usage-tracker");
+
 // ---------------------------------------------------------------------------
 // Filter translation
 // ---------------------------------------------------------------------------
@@ -240,6 +242,7 @@ async function main() {
 
       people.push(...batch);
       log(jobId, `Step 1 — Page ${page}: ${batch.length} record(s) — total so far: ${people.length}`);
+      logApiCall(jobId, job.clientName, job.listName, "apollo_search", `search page ${page}`, batch.length);
 
       if (recordLimit && people.length >= recordLimit) {
         people.splice(recordLimit);
@@ -323,6 +326,7 @@ async function main() {
       }
 
       log(jobId, `Step 2 — Batch ${batchNum}/${totalBatches}: ${batchFound}/${batch.length} emails found (credits used: ${credits})`);
+      logApiCall(jobId, job.clientName, job.listName, "apollo_enrichment", `bulk_match batch ${batchNum}/${totalBatches}`, batchFound, { apolloCredits: credits });
     } catch (err) {
       const detail = err.response?.data ?? err.message;
       log(jobId, `Step 2 — Batch ${batchNum}/${totalBatches} error (non-fatal): ${JSON.stringify(detail)}`);

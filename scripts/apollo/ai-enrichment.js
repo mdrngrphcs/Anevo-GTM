@@ -11,6 +11,7 @@ const ROOT = path.resolve(__dirname, "../..");
 const BATCH_SIZE = 50;
 const domainCache = require("../utils/domain-cache");
 const { saveCheckpoint, loadCheckpoint } = require("../utils/checkpoint");
+const { logApiCall } = require("../utils/usage-tracker");
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing  (--job-id=xxx  --start-batch=N)
@@ -353,7 +354,7 @@ async function enrichDecisionMakers(row, decisionMakerContext) {
 // the slowest call overall.
 // ---------------------------------------------------------------------------
 
-async function runPhase1WebsiteSummaries(batch, enrichments) {
+async function runPhase1WebsiteSummaries(batch, enrichments, jobCtx) {
   if (!enrichments.websiteSummary) return;
   await Promise.all(batch.map(async (row) => {
     const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
@@ -362,10 +363,12 @@ async function runPhase1WebsiteSummaries(batch, enrichments) {
       if (cached) {
         row.website_summary = cached;
         log(`     [${label}] website_summary: cache hit (${domainCache.normalizeDomain(row.company_website)})`);
+        logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "openai_website", `website_summary cache hit`, 1, { cacheHit: true });
       } else {
         row.website_summary = await enrichWebsiteSummary(row);
         domainCache.saveSummary(row.company_website, row.website_summary);
         log(`     [${label}] website_summary: ${row.website_summary.slice(0, 80)}…`);
+        logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "openai_website", `website_summary api call`, 1, { cacheHit: false });
       }
     } catch (err) {
       row.website_summary = "error";
@@ -374,13 +377,14 @@ async function runPhase1WebsiteSummaries(batch, enrichments) {
   }));
 }
 
-async function runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext) {
+async function runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext, jobCtx) {
   if (!enrichments.icpClassification) return;
   await Promise.all(batch.map(async (row) => {
     const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
     try {
       row.icp_classification = await enrichIcpClassification(row, icpCriteria, icpContext);
       log(`     [${label}] icp_classification: ${row.icp_classification}`);
+      logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "deepseek_icp", `icp_classification`, 1);
     } catch (err) {
       row.icp_classification = "error";
       log(`     [${label}] icp_classification ERROR: ${err.message}`);
@@ -388,19 +392,27 @@ async function runPhase2IcpClassification(batch, enrichments, icpCriteria, icpCo
   }));
 }
 
-async function runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx) {
+async function runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx, jobCtx) {
   if (!icpFits.length) return;
   await Promise.all(icpFits.flatMap((row) => {
     const label = `${row.first_name || ""} ${row.last_name || ""}`.trim();
     return [
       enrichments.businessLabeling
         ? enrichBusinessType(row, businessTypeTemplate)
-            .then((r) => { row.business_type = r; log(`     [${label}] business_type: ${r}`); })
+            .then((r) => {
+              row.business_type = r;
+              log(`     [${label}] business_type: ${r}`);
+              logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "anthropic_label", `business_type`, 1);
+            })
             .catch((err) => { row.business_type = "error"; log(`     [${label}] business_type ERROR: ${err.message}`); })
         : Promise.resolve(),
       enrichments.decisionMakerDiscovery
         ? enrichDecisionMakers(row, decisionMakerCtx)
-            .then((r) => { row.additional_decision_makers = r; log(`     [${label}] decision_makers: ${r}`); })
+            .then((r) => {
+              row.additional_decision_makers = r;
+              log(`     [${label}] decision_makers: ${r}`);
+              logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "openai_decision", `decision_maker`, 1);
+            })
             .catch((err) => { row.additional_decision_makers = "error"; log(`     [${label}] decision_makers ERROR: ${err.message}`); })
         : Promise.resolve(),
     ];
@@ -462,6 +474,12 @@ async function main() {
     const icpContext             = job?.enrichments?.icpClassificationContext ?? "";
     const businessTypeTemplate   = job?.enrichments?.businessTypeLabelTemplate ?? "";
     const decisionMakerCtx       = job?.enrichments?.decisionMakerContext ?? "";
+
+    const jobCtx = {
+      jobId:      job?.jobId      ?? "unknown",
+      clientName: job?.clientName ?? "unknown",
+      listName:   job?.listName   ?? filename,
+    };
 
     if (job) {
       log(`  Job: ${job.jobId}`);
@@ -549,12 +567,12 @@ async function main() {
 
       // Phase 1: all website summaries simultaneously
       const p1Start = Date.now();
-      await runPhase1WebsiteSummaries(batch, enrichments);
+      await runPhase1WebsiteSummaries(batch, enrichments, jobCtx);
       log(`  ── Phase 1 (website summaries): ${((Date.now() - p1Start) / 1000).toFixed(1)}s`);
 
       // Phase 2: all ICP classifications simultaneously
       const p2Start = Date.now();
-      await runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext);
+      await runPhase2IcpClassification(batch, enrichments, icpCriteria, icpContext, jobCtx);
       const icpFits = enrichments.icpClassification
         ? batch.filter((r) => r.icp_classification === "icp fit")
         : batch;
@@ -568,7 +586,7 @@ async function main() {
 
       // Phase 3: business type + decision makers for ICP fits simultaneously
       const p3Start = Date.now();
-      await runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx);
+      await runPhase3IcpFitEnrichments(icpFits, enrichments, businessTypeTemplate, decisionMakerCtx, jobCtx);
       if (icpFits.length > 0) {
         log(`  ── Phase 3 (business type + decision makers): ${((Date.now() - p3Start) / 1000).toFixed(1)}s`);
       }

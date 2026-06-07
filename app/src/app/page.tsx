@@ -4,8 +4,9 @@ import { useState } from "react";
 import NewOrderForm from "@/components/NewOrderForm";
 import ActiveOrders from "@/components/ActiveOrders";
 import CompletedOrders from "@/components/CompletedOrders";
+import UsageDashboard from "@/components/UsageDashboard";
 
-type Tab = "new" | "active" | "completed";
+type Tab = "new" | "active" | "completed" | "usage";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("new");
@@ -14,6 +15,7 @@ export default function Home() {
     { id: "new", label: "New Order" },
     { id: "active", label: "Active Orders" },
     { id: "completed", label: "Completed" },
+    { id: "usage", label: "Usage" },
   ];
 
   return (
@@ -45,6 +47,7 @@ export default function Home() {
       {activeTab === "new" && <NewOrderForm onOrderPlaced={() => setActiveTab("active")} />}
       {activeTab === "active" && <ActiveOrders />}
       {activeTab === "completed" && <CompletedOrders />}
+      {activeTab === "usage" && <UsageDashboard />}
     </div>
   );
 }

@@ -9,6 +9,30 @@ require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 const ROOT = path.resolve(__dirname, "../..");
 const RATE_LIMIT_MS = 300;
 
+const { logApiCall } = require("../utils/usage-tracker");
+
+// Resolve job context from filename (best-effort — used for usage logging)
+function resolveJobContext(rawFilename) {
+  const dirs = ["processing", "completed", "failed", "queued"];
+  for (const status of dirs) {
+    const dir = path.join(ROOT, `jobs/${status}`);
+    if (!fs.existsSync(dir)) continue;
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".json"))) {
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+        if (job.outputFilename && rawFilename.startsWith(job.outputFilename.replace("_raw_", ""))) {
+          return { jobId: job.jobId, clientName: job.clientName, listName: job.listName };
+        }
+        // Also match by jobId embedded in filename
+        if (rawFilename.includes(job.jobId)) {
+          return { jobId: job.jobId, clientName: job.clientName, listName: job.listName };
+        }
+      } catch {}
+    }
+  }
+  return { jobId: "unknown", clientName: "unknown", listName: rawFilename };
+}
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -93,6 +117,7 @@ async function main() {
     const cleanedFilename = filename.replace("_raw_", "_cleaned_");
     const cleanedPath = path.join(cleanedDir, cleanedFilename);
 
+    const jobCtx = resolveJobContext(filename);
     log(`━━━ Processing: ${filename}`);
 
     const rows = parse(fs.readFileSync(rawPath, "utf8"), {
@@ -128,6 +153,7 @@ async function main() {
       try {
         row["Result"] = await verifyMillionVerifier(email, mvKey);
         log(`  MV    ${email} → ${row["Result"]}`);
+        logApiCall(jobCtx.jobId, jobCtx.clientName, jobCtx.listName, "millionverifier", `verify ${email}`, 1);
       } catch (err) {
         row["Result"] = "unknown";
         log(`  MV    ${email} → ERROR: ${err.response?.data?.error ?? err.message}`);
