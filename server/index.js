@@ -264,6 +264,9 @@ app.get("/api/orders/:id/download", (req, res) => {
   const job = findJobById(req.params.id);
   if (!job) return res.status(404).json({ error: "Job not found" });
 
+  // Prefer Drive URL if the job was uploaded successfully
+  if (job.driveUrl) return res.redirect(302, job.driveUrl);
+
   const base  = job.outputFilename; // e.g. testclient_apollo_raw_6_7_26.csv
   const tries = [
     path.join(ROOT, "data", "final",    base.replace("_raw_", "_final_")),

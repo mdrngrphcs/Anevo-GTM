@@ -5,6 +5,8 @@ const fs = require("fs");
 const { parse } = require("csv-parse/sync");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
+const { uploadToDrive } = require("../utils/drive-uploader");
+
 const ROOT = path.resolve(__dirname, "../..");
 
 // ---------------------------------------------------------------------------
@@ -102,10 +104,26 @@ function flagRow(row) {
 }
 
 // ---------------------------------------------------------------------------
+// Persist driveUrl into the completed job JSON
+// ---------------------------------------------------------------------------
+
+function saveJobDriveUrl(job, driveUrl) {
+  if (!job) return;
+  const jobPath = path.join(ROOT, "jobs/completed", `${job.jobId}.json`);
+  if (!fs.existsSync(jobPath)) return;
+  try {
+    const updated = { ...job, driveUrl };
+    fs.writeFileSync(jobPath, JSON.stringify(updated, null, 2));
+  } catch (err) {
+    log(`  Warning: could not save driveUrl to job JSON: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
   const enrichedDir = path.join(ROOT, "data/enriched");
   const finalDir = path.join(ROOT, "data/final");
   fs.mkdirSync(finalDir, { recursive: true });
@@ -158,6 +176,15 @@ function main() {
     const outHeaders = [...Object.keys(rows[0] || {}).filter(k => k !== "qa_flags" && k !== "qa_status"), "qa_flags", "qa_status"];
     fs.writeFileSync(finalPath, stringifyCSV(outHeaders, rows));
 
+    // ── Google Drive upload ────────────────────────────────────────────────
+    try {
+      const driveUrl = await uploadToDrive(finalPath, finalFilename);
+      log(`Uploaded to Drive: ${driveUrl}`);
+      saveJobDriveUrl(job, driveUrl);
+    } catch (err) {
+      log(`  Warning: Drive upload failed (file still saved locally): ${err.message}`);
+    }
+
     // ── QA Summary Report ──────────────────────────────────────────────────
     const divider = "═".repeat(50);
     const report = [
@@ -184,9 +211,7 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   console.error("Fatal:", err.message);
   process.exit(1);
-}
+});

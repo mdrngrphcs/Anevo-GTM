@@ -48,6 +48,9 @@ jobs/checkpoints/*
 # Domain cache — stays local, never committed
 config/domain-cache.json
 
+# Google service account key — contains private key, never committed
+config/google-service-account.json
+
 # OS
 .DS_Store
 Thumbs.db
