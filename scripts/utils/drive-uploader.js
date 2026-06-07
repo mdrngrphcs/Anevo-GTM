@@ -9,7 +9,10 @@ const FOLDER_ID     = "1VCUSCJ0uG7wwobl_e58Zr3NtfLTyBL6M";
 const KEY_FILE_PATH = path.join(ROOT, "config/google-service-account.json");
 
 // ---------------------------------------------------------------------------
-// Auth — GOOGLE_SERVICE_ACCOUNT_JSON env var takes priority over key file
+// Auth — GOOGLE_SERVICE_ACCOUNT_JSON env var takes priority over key file.
+// Set GOOGLE_IMPERSONATE_EMAIL to a folder owner's address when the target
+// folder is in a personal My Drive (requires domain-wide delegation on the
+// service account in Google Workspace Admin Console).
 // ---------------------------------------------------------------------------
 
 function getAuth() {
@@ -29,10 +32,17 @@ function getAuth() {
     );
   }
 
-  return new google.auth.GoogleAuth({
+  const authOpts = {
     credentials,
-    scopes: ["https://www.googleapis.com/auth/drive.file"],
-  });
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  };
+
+  // Impersonate the folder owner when targeting a personal My Drive
+  if (process.env.GOOGLE_IMPERSONATE_EMAIL) {
+    authOpts.clientOptions = { subject: process.env.GOOGLE_IMPERSONATE_EMAIL };
+  }
+
+  return new google.auth.GoogleAuth(authOpts);
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +57,7 @@ async function uploadToDrive(localFilePath, fileName) {
   const mimeType = "text/csv";
 
   const response = await drive.files.create({
+    supportsAllDrives: true,
     requestBody: {
       name:    fileName,
       parents: [FOLDER_ID],
@@ -64,6 +75,7 @@ async function uploadToDrive(localFilePath, fileName) {
   // Make the file readable by anyone with the link
   await drive.permissions.create({
     fileId,
+    supportsAllDrives: true,
     requestBody: { role: "reader", type: "anyone" },
   });
 
