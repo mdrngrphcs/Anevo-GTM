@@ -79,6 +79,7 @@ function createJob(rawConfig) {
     enrichments: config.enrichments,
     outputDestination: config.outputDestination,
     outputFilename,
+    ...(config.recordLimit != null ? { recordLimit: config.recordLimit } : {}),
   };
 
   const queuedDir = path.resolve(__dirname, "../../jobs/queued");
