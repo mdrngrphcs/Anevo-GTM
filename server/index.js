@@ -1,6 +1,13 @@
 // Railway Express API server — handles long-running pipeline jobs
 "use strict";
 
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err.message, err.stack);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
 const express = require("express");
 const cors    = require("cors");
 const path    = require("path");
