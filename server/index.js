@@ -1,3 +1,4 @@
+// Railway Express API server — handles long-running pipeline jobs
 "use strict";
 
 const express = require("express");
