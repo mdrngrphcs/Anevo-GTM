@@ -90,18 +90,21 @@ function findJobById(jobId) {
 }
 
 function spawnPipeline(jobId) {
-  const script = path.resolve(ROOT, "scripts", "run-from-job.js");
-  const child  = cp.spawn(process.execPath, [script, jobId], {
-    cwd: ROOT, detached: true, stdio: "ignore",
+  const script  = path.resolve(ROOT, "scripts", "run-from-job.js");
+  const command = process.execPath;
+  const args    = [script, jobId];
+  console.log(`[spawn] Spawning pipeline: ${command} ${args.join(" ")} (cwd: ${ROOT})`);
+
+  const child = cp.spawn(command, args, {
+    cwd: ROOT, detached: true, stdio: "inherit",
     env: { ...process.env },
   });
+
   child.on("error", (err) => {
-    const logDir = path.join(ROOT, "logs");
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.appendFileSync(
-      path.join(logDir, "spawn-errors.log"),
-      `[${new Date().toISOString()}] [${jobId}] Spawn error: ${err.message}\n`
-    );
+    console.error(`[spawn] Pipeline spawn error [${jobId}]:`, err.message);
+  });
+  child.on("exit", (code) => {
+    console.log(`[spawn] Pipeline exited [${jobId}] with code:`, code);
   });
   child.unref();
 }
