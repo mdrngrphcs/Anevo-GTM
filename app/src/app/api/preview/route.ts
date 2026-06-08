@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const RAILWAY_URL     = process.env.RAILWAY_URL?.replace(/\/$/, "");
 const APOLLO_ENDPOINT = "https://api.apollo.io/v1/mixed_people/api_search";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +48,9 @@ function translateFilters(icp: any): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest) {
+  const RAILWAY_URL = process.env.RAILWAY_URL?.replace(/\/$/, "");
+  console.log("[preview POST] RAILWAY_URL:", RAILWAY_URL ?? "(not set)");
+
   let body: any;
   try {
     body = await req.json();
@@ -57,15 +59,18 @@ export async function POST(req: NextRequest) {
   }
 
   if (RAILWAY_URL) {
+    const forwardUrl = `${RAILWAY_URL}/api/preview`;
+    console.log("[preview POST] forwarding to:", forwardUrl);
     try {
-      const upstream = await fetch(`${RAILWAY_URL}/api/preview`, {
+      const upstream = await fetch(forwardUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(15000),
       });
       return NextResponse.json(await upstream.json(), { status: upstream.status });
-    } catch {
+    } catch (err: any) {
+      console.error("[preview POST] Railway forward failed:", err?.message);
       return NextResponse.json(
         { count: null, source: "Apollo", error: "Preview unavailable — you can still place your order" },
         { status: 200 }

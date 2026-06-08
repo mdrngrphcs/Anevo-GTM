@@ -4,16 +4,21 @@ import path from "path";
 
 export const runtime = "nodejs";
 
-const RAILWAY_URL  = process.env.RAILWAY_URL?.replace(/\/$/, "");
-const LISTS_PATH   = path.resolve(process.cwd(), "../config/pulled-lists.json");
+const LISTS_PATH = path.resolve(process.cwd(), "../config/pulled-lists.json");
 
 export async function GET() {
+  const RAILWAY_URL = process.env.RAILWAY_URL?.replace(/\/$/, "");
+  console.log("[lists GET] RAILWAY_URL:", RAILWAY_URL ?? "(not set)");
+
   if (RAILWAY_URL) {
+    const forwardUrl = `${RAILWAY_URL}/api/lists`;
+    console.log("[lists GET] forwarding to:", forwardUrl);
     try {
-      const upstream = await fetch(`${RAILWAY_URL}/api/lists`, { signal: AbortSignal.timeout(15000) });
+      const upstream = await fetch(forwardUrl, { signal: AbortSignal.timeout(15000) });
       return NextResponse.json(await upstream.json(), { status: upstream.status });
-    } catch {
-      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    } catch (err: any) {
+      console.error("[lists GET] Railway forward failed:", err?.message);
+      return NextResponse.json({ error: "Railway unreachable", detail: err?.message }, { status: 502 });
     }
   }
 

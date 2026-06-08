@@ -5,7 +5,6 @@ import cp from "child_process";
 
 export const runtime = "nodejs";
 
-const RAILWAY_URL   = process.env.RAILWAY_URL?.replace(/\/$/, "");
 const PIPELINE_ROOT = path.resolve(process.cwd(), "..");
 
 function spawnPipeline(jobId: string) {
@@ -67,14 +66,19 @@ function readJobsFromDir(dirName: string) {
 }
 
 export async function GET(req: NextRequest) {
+  const RAILWAY_URL = process.env.RAILWAY_URL?.replace(/\/$/, "");
+  console.log("[orders GET] RAILWAY_URL:", RAILWAY_URL ?? "(not set)");
+
   if (RAILWAY_URL) {
     const status = req.nextUrl.searchParams.get("status");
     const url = status ? `${RAILWAY_URL}/api/orders?status=${status}` : `${RAILWAY_URL}/api/orders`;
+    console.log("[orders GET] forwarding to:", url);
     try {
       const upstream = await fetch(url, { signal: AbortSignal.timeout(15000) });
       return NextResponse.json(await upstream.json(), { status: upstream.status });
-    } catch {
-      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    } catch (err: any) {
+      console.error("[orders GET] Railway forward failed:", err?.message);
+      return NextResponse.json({ error: "Railway unreachable", detail: err?.message }, { status: 502 });
     }
   }
 
@@ -107,6 +111,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const RAILWAY_URL = process.env.RAILWAY_URL?.replace(/\/$/, "");
+  console.log("[orders POST] RAILWAY_URL:", RAILWAY_URL ?? "(not set)");
+
   let body: any;
   try {
     body = await req.json();
@@ -115,16 +122,19 @@ export async function POST(req: NextRequest) {
   }
 
   if (RAILWAY_URL) {
+    const forwardUrl = `${RAILWAY_URL}/api/orders`;
+    console.log("[orders POST] forwarding to:", forwardUrl);
     try {
-      const upstream = await fetch(`${RAILWAY_URL}/api/orders`, {
+      const upstream = await fetch(forwardUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(30000),
       });
       return NextResponse.json(await upstream.json(), { status: upstream.status });
-    } catch {
-      return NextResponse.json({ error: "Railway unreachable" }, { status: 502 });
+    } catch (err: any) {
+      console.error("[orders POST] Railway forward failed:", err?.message);
+      return NextResponse.json({ error: "Railway unreachable", detail: err?.message }, { status: 502 });
     }
   }
 
