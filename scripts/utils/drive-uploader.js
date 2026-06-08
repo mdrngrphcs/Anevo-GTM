@@ -5,7 +5,8 @@ const fs     = require("fs");
 const { google } = require("googleapis");
 
 const ROOT          = path.resolve(__dirname, "../..");
-const FOLDER_ID     = "1VCUSCJ0uG7wwobl_e58Zr3NtfLTyBL6M";
+const FOLDER_ID     = "0AM-9n4GWmWD5Uk9PVA";
+const DRIVE_ID      = "0AM-9n4GWmWD5Uk9PVA";
 const KEY_FILE_PATH = path.join(ROOT, "config/google-service-account.json");
 
 // ---------------------------------------------------------------------------
@@ -57,7 +58,10 @@ async function uploadToDrive(localFilePath, fileName) {
   const mimeType = "text/csv";
 
   const response = await drive.files.create({
-    supportsAllDrives: true,
+    supportsAllDrives:       true,
+    driveId:                 DRIVE_ID,
+    corpora:                 "drive",
+    includeItemsFromAllDrives: true,
     requestBody: {
       name:    fileName,
       parents: [FOLDER_ID],
