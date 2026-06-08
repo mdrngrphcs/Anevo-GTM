@@ -8,19 +8,38 @@ process.on("unhandledRejection", (reason) => {
   console.error("UNHANDLED REJECTION:", reason);
 });
 
-const express = require("express");
-const cors    = require("cors");
-const path    = require("path");
-const fs      = require("fs");
-const cp      = require("child_process");
-const axios   = require("axios");
-require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+console.log("[startup] Loading modules…");
 
-const { getUsageSummary } = require("../scripts/utils/usage-tracker");
+let express, cors, path, fs, cp, axios, getUsageSummary;
+try {
+  express        = require("express");          console.log("[startup] express ✓");
+  cors           = require("cors");             console.log("[startup] cors ✓");
+  path           = require("path");
+  fs             = require("fs");
+  cp             = require("child_process");
+  axios          = require("axios");            console.log("[startup] axios ✓");
+  require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
+  ({ getUsageSummary } = require("../scripts/utils/usage-tracker"));
+                                                console.log("[startup] usage-tracker ✓");
+} catch (err) {
+  console.error("[startup] FATAL — module load failed:", err.message, err.stack);
+  process.exit(1);
+}
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
 const ROOT = path.resolve(__dirname, "..");
+
+// Pre-create all directories the server reads/writes so Railway's ephemeral
+// filesystem doesn't cause readdir errors on first boot.
+for (const dir of [
+  "jobs/queued", "jobs/processing", "jobs/completed", "jobs/failed",
+  "data/raw", "data/cleaned", "data/enriched", "data/final",
+  "logs", "config",
+]) {
+  fs.mkdirSync(path.join(ROOT, dir), { recursive: true });
+}
+console.log("[startup] directories ensured ✓");
 
 app.use(cors());
 app.use(express.json());
