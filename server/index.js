@@ -339,8 +339,8 @@ app.get("/api/orders/:id/download", async (req, res) => {
   }
 
   if (job.driveUrl) {
-    console.log(`[download] Redirecting to Drive URL: ${job.driveUrl}`);
-    return res.redirect(302, job.driveUrl);
+    console.log(`[download] Returning Drive URL: ${job.driveUrl}`);
+    return res.json({ driveUrl: job.driveUrl });
   }
 
   const base  = job.outputFilename;

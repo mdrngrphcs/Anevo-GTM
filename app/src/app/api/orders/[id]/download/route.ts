@@ -29,25 +29,8 @@ export async function GET(
     const forwardUrl = `${RAILWAY_URL}/api/orders/${id}/download`;
     console.log("[download route] forwarding to:", forwardUrl);
     try {
-      // redirect:'follow' so fetch follows Railway's 302→Drive redirect automatically
-      const upstream = await fetch(forwardUrl, {
-        redirect: "follow",
-        signal: AbortSignal.timeout(30000),
-      });
-
-      if (!upstream.ok) {
-        const error = await upstream.json().catch(() => ({ error: "Download failed" }));
-        return NextResponse.json(error, { status: upstream.status });
-      }
-
-      const contentType        = upstream.headers.get("content-type")        ?? "text/csv";
-      const contentDisposition = upstream.headers.get("content-disposition") ?? `attachment; filename="${id}.csv"`;
-      const body = await upstream.arrayBuffer();
-
-      return new NextResponse(body, {
-        status: 200,
-        headers: { "Content-Type": contentType, "Content-Disposition": contentDisposition },
-      });
+      const upstream = await fetch(forwardUrl, { signal: AbortSignal.timeout(30000) });
+      return NextResponse.json(await upstream.json(), { status: upstream.status });
     } catch (err: any) {
       console.error("[download route] Railway forward failed:", err?.message);
       return NextResponse.json({ error: "Railway unreachable", detail: err?.message }, { status: 502 });
@@ -61,7 +44,7 @@ export async function GET(
   }
 
   if (job.driveUrl) {
-    return NextResponse.redirect(job.driveUrl, 302);
+    return NextResponse.json({ driveUrl: job.driveUrl });
   }
 
   const base  = job.outputFilename as string;

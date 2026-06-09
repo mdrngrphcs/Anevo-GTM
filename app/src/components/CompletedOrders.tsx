@@ -42,20 +42,14 @@ export default function CompletedOrders() {
     setDownloading(jobId);
     try {
       const res = await fetch(`/api/orders/${jobId}/download`);
-      if (!res.ok) {
-        alert("Download failed — file may not exist yet.");
-        return;
+      const data = await res.json();
+      if (data.driveUrl) {
+        window.open(data.driveUrl, "_blank");
+      } else {
+        alert(data.error ?? "Download failed — file may not be ready yet.");
       }
-      const blob = await res.blob();
-      const contentDisposition = res.headers.get("Content-Disposition") ?? "";
-      const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-      const filename = filenameMatch?.[1] ?? `${jobId}.csv`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+    } catch {
+      alert("Download failed — please try again.");
     } finally {
       setDownloading(null);
     }
