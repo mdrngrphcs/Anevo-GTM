@@ -283,27 +283,69 @@ app.get("/api/usage", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/orders/:id/download", (req, res) => {
-  const job = findJobById(req.params.id);
-  if (!job) return res.status(404).json({ error: "Job not found" });
+  const jobId = req.params.id;
+  console.log(`[download] Requested job ID: ${jobId}`);
+
+  const job = findJobById(jobId);
+  if (!job) {
+    console.log(`[download] Job not found: ${jobId}`);
+    return res.status(404).json({ error: "Job not found" });
+  }
+  console.log(`[download] Job found — status: ${job.status}, outputFilename: ${job.outputFilename}`);
+  console.log(`[download] driveUrl: ${job.driveUrl ?? "(not set)"}`);
 
   // Prefer Drive URL if the job was uploaded successfully
-  if (job.driveUrl) return res.redirect(302, job.driveUrl);
+  if (job.driveUrl) {
+    console.log(`[download] Redirecting to Drive URL: ${job.driveUrl}`);
+    return res.redirect(302, job.driveUrl);
+  }
 
-  const base  = job.outputFilename; // e.g. testclient_apollo_raw_6_7_26.csv
+  const base  = job.outputFilename;
   const tries = [
     path.join(ROOT, "data", "final",    base.replace("_raw_", "_final_")),
     path.join(ROOT, "data", "enriched", base.replace("_raw_", "_enriched_")),
     path.join(ROOT, "data", "cleaned",  base.replace("_raw_", "_cleaned_")),
     path.join(ROOT, "data", "raw",      base),
   ];
+  console.log(`[download] Checking local paths:\n${tries.map((p) => `  ${p} — ${fs.existsSync(p) ? "EXISTS" : "not found"}`).join("\n")}`);
 
   const filePath = tries.find((p) => fs.existsSync(p));
-  if (!filePath) return res.status(404).json({ error: "Output file not found" });
+  if (!filePath) {
+    console.log(`[download] No local file found for job ${jobId}`);
+    return res.status(404).json({ error: "Output file not found" });
+  }
 
   const filename = path.basename(filePath);
+  console.log(`[download] Streaming local file: ${filePath}`);
   res.setHeader("Content-Type", "text/csv");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   fs.createReadStream(filePath).pipe(res);
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/test-download — inspect driveUrl on the most recent completed job
+// ---------------------------------------------------------------------------
+
+app.get("/api/test-download", (_req, res) => {
+  const completed = readJobsFromDir("completed")
+    .sort((a, b) => ((b.endedAt ?? b.createdAt) > (a.endedAt ?? a.createdAt) ? 1 : -1));
+
+  if (!completed.length) {
+    return res.json({ found: false, message: "No completed jobs" });
+  }
+
+  const job = completed[0];
+  const jobPath = path.join(ROOT, "jobs", "completed", `${job.jobId}.json`);
+  res.json({
+    jobId:          job.jobId,
+    clientName:     job.clientName,
+    listName:       job.listName,
+    outputFilename: job.outputFilename,
+    driveUrl:       job.driveUrl ?? null,
+    jobFilePath:    jobPath,
+    jobFileExists:  fs.existsSync(jobPath),
+    endedAt:        job.endedAt ?? null,
+  });
 });
 
 // ---------------------------------------------------------------------------

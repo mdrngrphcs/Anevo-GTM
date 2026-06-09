@@ -108,12 +108,20 @@ function flagRow(row) {
 // ---------------------------------------------------------------------------
 
 function saveJobDriveUrl(job, driveUrl) {
-  if (!job) return;
+  if (!job) {
+    log("  Warning: saveJobDriveUrl called with no job — driveUrl not persisted");
+    return;
+  }
   const jobPath = path.join(ROOT, "jobs/completed", `${job.jobId}.json`);
-  if (!fs.existsSync(jobPath)) return;
+  log(`  Saving driveUrl to: ${jobPath}`);
+  if (!fs.existsSync(jobPath)) {
+    log(`  Warning: job file not found at ${jobPath} — driveUrl not persisted`);
+    return;
+  }
   try {
     const updated = { ...job, driveUrl };
     fs.writeFileSync(jobPath, JSON.stringify(updated, null, 2));
+    log(`  driveUrl saved successfully to ${jobPath}`);
   } catch (err) {
     log(`  Warning: could not save driveUrl to job JSON: ${err.message}`);
   }
