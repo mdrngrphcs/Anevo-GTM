@@ -40,8 +40,18 @@ function validate(config) {
   }
 }
 
+function toSafeSlug(s) {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[/\\:*?"<>|[\]()]/g, "_")  // chars invalid in filenames
+    .replace(/\s+/g, "_")                 // spaces → underscores
+    .replace(/_+/g, "_")                  // collapse consecutive underscores
+    .replace(/^_+|_+$/g, "");             // trim leading/trailing underscores
+}
+
 function buildOutputFilename(clientName, source, date = new Date()) {
-  const slug = clientName.trim().toLowerCase().replace(/\s+/g, "_");
+  const slug = toSafeSlug(clientName);
   const m = date.getMonth() + 1;
   const d = date.getDate();
   const y = String(date.getFullYear()).slice(-2);
@@ -49,9 +59,7 @@ function buildOutputFilename(clientName, source, date = new Date()) {
 }
 
 function buildJobId(clientName, listName, ts = Date.now()) {
-  const clientSlug = clientName.trim().toLowerCase().replace(/\s+/g, "_");
-  const listSlug = listName.trim().toLowerCase().replace(/\s+/g, "_");
-  return `${clientSlug}_${listSlug}_${ts}`;
+  return `${toSafeSlug(clientName)}_${toSafeSlug(listName)}_${ts}`;
 }
 
 function createJob(rawConfig) {
