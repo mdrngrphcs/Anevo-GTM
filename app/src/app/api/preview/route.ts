@@ -22,18 +22,63 @@ function headcountToRanges(min: number | null, max: number | null): string[] {
     .map(([bLo, bHi]) => `${bLo},${bHi}`);
 }
 
+// Real Apollo industry MongoDB ObjectIDs — discovered via bulk_match enrichment
+const APOLLO_INDUSTRY_IDS: Record<string, string> = {
+  "information technology & services":  "5567cd4773696439b10b0000",
+  "computer software":                  "5567cd4773696439b10b0000",
+  "internet":                           "5567cd4d736964397e020000",
+  "marketing & advertising":            "5567cd467369644d39040000",
+  "public relations & communications":  "5567ce5973696453d9780000",
+  "financial services":                 "5567cdd67369643e64020000",
+  "investment management":              "5567e0bc7369641d11550200",
+  "capital markets":                    "5567cdb773696439a9080000",
+  "insurance":                          "5567cdd973696453d93f0000",
+  "accounting":                         "5567ce1f7369643b78570000",
+  "real estate":                        "5567cd477369645401010000",
+  "commercial real estate":             "5567e1887369641d68d40100",
+  "construction":                       "5567cd4773696439dd350000",
+  "architecture & planning":            "5567cdb77369645401080000",
+  "biotechnology":                      "5567d08e7369645dbc4b0000",
+  "pharmaceuticals":                    "5567e0eb73696410e4bd1200",
+  "research":                           "5567e09f736964160ebb0100",
+  "staffing & recruiting":              "5567e09973696410db020800",
+  "human resources":                    "5567e0e37369640e5ac10c00",
+  "management consulting":              "5567cdd47369643dbf260000",
+  "oil & energy":                       "5567cdd97369645624020000",
+  "retail":                             "5567ced173696450cb580000",
+  "hospitality":                        "5567ce9d7369643bc19c0000",
+  "leisure, travel & tourism":          "5567cdd87369643bc12f0000",
+  "higher education":                   "5567cd4c73696453e1300000",
+};
+
 function translateFilters(icp: any): Record<string, unknown> {
   const params: Record<string, unknown> = {};
 
-  if (icp.titles?.length)    params.person_titles    = icp.titles;
-  if (icp.location?.length)  params.person_locations = icp.location;
+  if (icp.titles?.length)   params.person_titles    = icp.titles;
+  if (icp.location?.length) params.person_locations = icp.location;
 
-  // Keywords and industries both go into keyword tags
+  // Map known industry names to Apollo hex IDs; unknown ones fall back to keyword tags
+  const industryIds: string[] = [];
+  const unmappedIndustries: string[] = [];
+  for (const ind of ((icp.industries as string[]) ?? [])) {
+    const id = APOLLO_INDUSTRY_IDS[ind.toLowerCase()];
+    if (id) {
+      if (!industryIds.includes(id)) industryIds.push(id);
+    } else {
+      unmappedIndustries.push(ind);
+    }
+  }
+  if (industryIds.length) params.organization_industry_tag_ids = industryIds;
+
   const keywords = [
     ...((icp.companyKeywords as string[]) ?? []),
-    ...((icp.industries     as string[]) ?? []),
+    ...unmappedIndustries,
   ];
   if (keywords.length) params.q_organization_keyword_tags = keywords;
+
+  if ((icp.companyKeywordsExclude as string[] | undefined)?.length) {
+    params.q_not_organization_keyword_tags = icp.companyKeywordsExclude;
+  }
 
   if (icp.headcount?.min != null || icp.headcount?.max != null) {
     const ranges = headcountToRanges(icp.headcount.min, icp.headcount.max);

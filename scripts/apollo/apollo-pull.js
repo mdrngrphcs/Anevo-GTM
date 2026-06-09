@@ -31,6 +31,44 @@ function headcountToRanges(min, max) {
     .map(([bLo, bHi]) => `${bLo},${bHi}`);
 }
 
+// Real Apollo industry MongoDB ObjectIDs — discovered via bulk_match enrichment
+const APOLLO_INDUSTRY_IDS = {
+  // Technology
+  "information technology & services":  "5567cd4773696439b10b0000",
+  "computer software":                  "5567cd4773696439b10b0000",
+  "internet":                           "5567cd4d736964397e020000",
+  // Marketing & Communications
+  "marketing & advertising":            "5567cd467369644d39040000",
+  "public relations & communications":  "5567ce5973696453d9780000",
+  // Finance
+  "financial services":                 "5567cdd67369643e64020000",
+  "investment management":              "5567e0bc7369641d11550200",
+  "capital markets":                    "5567cdb773696439a9080000",
+  "insurance":                          "5567cdd973696453d93f0000",
+  "accounting":                         "5567ce1f7369643b78570000",
+  // Real Estate & Construction
+  "real estate":                        "5567cd477369645401010000",
+  "commercial real estate":             "5567e1887369641d68d40100",
+  "construction":                       "5567cd4773696439dd350000",
+  "architecture & planning":            "5567cdb77369645401080000",
+  // Healthcare & Life Sciences
+  "biotechnology":                      "5567d08e7369645dbc4b0000",
+  "pharmaceuticals":                    "5567e0eb73696410e4bd1200",
+  "research":                           "5567e09f736964160ebb0100",
+  // Business Services
+  "staffing & recruiting":              "5567e09973696410db020800",
+  "human resources":                    "5567e0e37369640e5ac10c00",
+  "management consulting":              "5567cdd47369643dbf260000",
+  // Energy
+  "oil & energy":                       "5567cdd97369645624020000",
+  // Retail, Travel & Hospitality
+  "retail":                             "5567ced173696450cb580000",
+  "hospitality":                        "5567ce9d7369643bc19c0000",
+  "leisure, travel & tourism":          "5567cdd87369643bc12f0000",
+  // Education
+  "higher education":                   "5567cd4c73696453e1300000",
+};
+
 // Apollo technology UIDs (slug-based)
 const TECHNOLOGY_UID_MAP = {
   "salesforce": "salesforce", "hubspot": "hubspot",
@@ -51,27 +89,41 @@ const TECHNOLOGY_UID_MAP = {
 function translateFilters(icp) {
   const params = {};
 
-  if (icp.titles?.length)          params.person_titles = icp.titles;
-  if (icp.location?.length)        params.person_locations = icp.location;
+  if (icp.titles?.length)   params.person_titles    = icp.titles;
+  if (icp.location?.length) params.person_locations = icp.location;
 
-  // Keywords and industries are both passed as keyword tags (industry tag IDs
-  // are account-specific and rejected by the API if unrecognised)
-  const keywords = [
-    ...(icp.companyKeywords ?? []),
-    ...(icp.industries ?? []),
-  ];
-  if (keywords.length)             params.q_organization_keyword_tags = keywords;
+  // Map known industry names to Apollo hex IDs; unknown ones fall back to keyword tags
+  const industryIds = [];
+  const unmappedIndustries = [];
+  for (const ind of (icp.industries ?? [])) {
+    const id = APOLLO_INDUSTRY_IDS[ind.toLowerCase()];
+    if (id) {
+      if (!industryIds.includes(id)) industryIds.push(id);
+    } else {
+      unmappedIndustries.push(ind);
+    }
+  }
+  if (industryIds.length) params.organization_industry_tag_ids = industryIds;
+
+  // Company keywords only (industries with known IDs go via organization_industry_tag_ids above)
+  const keywords = [...(icp.companyKeywords ?? []), ...unmappedIndustries];
+  if (keywords.length) params.q_organization_keyword_tags = keywords;
+
+  // Keyword exclusions
+  if (icp.companyKeywordsExclude?.length) {
+    params.q_not_organization_keyword_tags = icp.companyKeywordsExclude;
+  }
 
   if (icp.headcount?.min != null || icp.headcount?.max != null) {
     const ranges = headcountToRanges(icp.headcount.min, icp.headcount.max);
-    if (ranges.length)             params.organization_num_employees_ranges = ranges;
+    if (ranges.length) params.organization_num_employees_ranges = ranges;
   }
 
   if (icp.technologies?.length) {
     const uids = icp.technologies
       .map((t) => TECHNOLOGY_UID_MAP[t.toLowerCase()])
       .filter(Boolean);
-    if (uids.length)               params.currently_using_any_of_technology_uids = uids;
+    if (uids.length) params.currently_using_any_of_technology_uids = uids;
   }
 
   return params;
