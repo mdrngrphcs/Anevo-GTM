@@ -10,7 +10,8 @@ const SEARCH_ENDPOINT     = "https://api.apollo.io/v1/mixed_people/api_search";
 const BULK_MATCH_ENDPOINT = "https://api.apollo.io/v1/people/bulk_match";
 const BULK_MATCH_BATCH    = 10; // Apollo bulk_match max per call
 
-const { logApiCall } = require("../utils/usage-tracker");
+const { logApiCall }    = require("../utils/usage-tracker");
+const { uploadJobJson } = require("../utils/drive-uploader");
 
 // ---------------------------------------------------------------------------
 // Filter translation
@@ -102,6 +103,9 @@ function moveJob(job, fromStatus, toStatus) {
   fs.mkdirSync(path.dirname(toPath), { recursive: true });
   fs.writeFileSync(toPath, JSON.stringify(job, null, 2));
   if (fs.existsSync(fromPath)) fs.unlinkSync(fromPath);
+  uploadJobJson(job.jobId, job).catch((err) =>
+    log(job.jobId, `Drive sync failed (status=${toStatus}): ${err.message}`)
+  );
 }
 
 // ---------------------------------------------------------------------------

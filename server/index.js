@@ -10,7 +10,8 @@ process.on("unhandledRejection", (reason) => {
 
 console.log("[startup] Loading modules…");
 
-let express, cors, path, fs, cp, axios, getUsageSummary;
+let express, cors, path, fs, cp, axios, getUsageSummary,
+    uploadJobJson, listJobJsonFiles, downloadJobJson, getJobFromDrive;
 try {
   express        = require("express");          console.log("[startup] express ✓");
   cors           = require("cors");             console.log("[startup] cors ✓");
@@ -21,6 +22,8 @@ try {
   require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
   ({ getUsageSummary } = require("../scripts/utils/usage-tracker"));
                                                 console.log("[startup] usage-tracker ✓");
+  ({ uploadJobJson, listJobJsonFiles, downloadJobJson, getJobFromDrive } =
+    require("../scripts/utils/drive-uploader")); console.log("[startup] drive-uploader ✓");
 } catch (err) {
   console.error("[startup] FATAL — module load failed:", err.message, err.stack);
   process.exit(1);
@@ -170,6 +173,7 @@ app.post("/api/orders", (req, res) => {
   fs.writeFileSync(path.join(queuedDir, `${jobId}.json`), JSON.stringify(job, null, 2));
 
   spawnPipeline(jobId);
+  uploadJobJson(jobId, job).catch((err) => console.warn(`[orders POST] Drive upload failed: ${err.message}`));
 
   res.status(201).json({ jobId, message: "Pipeline started" });
 });
@@ -178,10 +182,33 @@ app.post("/api/orders", (req, res) => {
 // GET /api/orders — list jobs by status
 // ---------------------------------------------------------------------------
 
-app.get("/api/orders", (req, res) => {
+app.get("/api/orders", async (req, res) => {
   const status = req.query.status;
-  let orders;
 
+  // Drive-primary: fetch all job JSONs from Drive
+  try {
+    const files = await listJobJsonFiles();
+    const jobs  = (
+      await Promise.all(files.map((f) => downloadJobJson(f.id).catch(() => null)))
+    ).filter(Boolean);
+
+    let orders;
+    if (status === "active") {
+      orders = jobs.filter((j) => j.status === "queued" || j.status === "processing");
+    } else if (status === "completed") {
+      orders = jobs
+        .filter((j) => j.status === "completed" || j.status === "failed")
+        .sort((a, b) => ((b.endedAt ?? b.createdAt) > (a.endedAt ?? a.createdAt) ? 1 : -1));
+    } else {
+      orders = jobs;
+    }
+    return res.json({ orders, source: "drive" });
+  } catch (err) {
+    console.warn("[orders GET] Drive read failed, falling back to local:", err.message);
+  }
+
+  // Local fallback (Railway ephemeral — only has jobs created this session)
+  let orders;
   if (status === "active") {
     orders = [...readJobsFromDir("queued"), ...readJobsFromDir("processing")];
   } else if (status === "completed") {
@@ -193,8 +220,7 @@ app.get("/api/orders", (req, res) => {
       ...readJobsFromDir("completed"), ...readJobsFromDir("failed"),
     ];
   }
-
-  res.json({ orders });
+  res.json({ orders, source: "local" });
 });
 
 // ---------------------------------------------------------------------------
@@ -282,19 +308,36 @@ app.get("/api/usage", (_req, res) => {
 // GET /api/orders/:id/download — stream final CSV
 // ---------------------------------------------------------------------------
 
-app.get("/api/orders/:id/download", (req, res) => {
+app.get("/api/orders/:id/download", async (req, res) => {
   const jobId = req.params.id;
   console.log(`[download] Requested job ID: ${jobId}`);
 
-  const job = findJobById(jobId);
+  // Try Drive first (survives Railway restarts)
+  let job = null;
+  try {
+    job = await getJobFromDrive(jobId);
+    if (job) {
+      console.log(`[download] Job found in Drive — status: ${job.status}, driveUrl: ${job.driveUrl ?? "(not set)"}`);
+    } else {
+      console.log(`[download] Job not in Drive, trying local...`);
+    }
+  } catch (err) {
+    console.warn(`[download] Drive lookup failed: ${err.message}`);
+  }
+
+  // Fall back to local
+  if (!job) {
+    job = findJobById(jobId);
+    if (job) {
+      console.log(`[download] Job found locally — status: ${job.status}, driveUrl: ${job.driveUrl ?? "(not set)"}`);
+    }
+  }
+
   if (!job) {
     console.log(`[download] Job not found: ${jobId}`);
     return res.status(404).json({ error: "Job not found" });
   }
-  console.log(`[download] Job found — status: ${job.status}, outputFilename: ${job.outputFilename}`);
-  console.log(`[download] driveUrl: ${job.driveUrl ?? "(not set)"}`);
 
-  // Prefer Drive URL if the job was uploaded successfully
   if (job.driveUrl) {
     console.log(`[download] Redirecting to Drive URL: ${job.driveUrl}`);
     return res.redirect(302, job.driveUrl);
@@ -326,17 +369,50 @@ app.get("/api/orders/:id/download", (req, res) => {
 // GET /api/test-download — inspect driveUrl on the most recent completed job
 // ---------------------------------------------------------------------------
 
-app.get("/api/test-download", (_req, res) => {
-  const completed = readJobsFromDir("completed")
-    .sort((a, b) => ((b.endedAt ?? b.createdAt) > (a.endedAt ?? a.createdAt) ? 1 : -1));
+app.get("/api/test-download", async (_req, res) => {
+  let driveJobs = [];
+  let driveError = null;
 
-  if (!completed.length) {
-    return res.json({ found: false, message: "No completed jobs" });
+  try {
+    const files = await listJobJsonFiles();
+    driveJobs = (
+      await Promise.all(files.map((f) => downloadJobJson(f.id).catch(() => null)))
+    ).filter(Boolean);
+  } catch (err) {
+    driveError = err.message;
   }
 
-  const job = completed[0];
+  const driveCompleted = driveJobs
+    .filter((j) => j.status === "completed" || j.status === "failed")
+    .sort((a, b) => ((b.endedAt ?? b.createdAt) > (a.endedAt ?? a.createdAt) ? 1 : -1));
+
+  if (driveCompleted.length) {
+    const job = driveCompleted[0];
+    return res.json({
+      source:          "drive",
+      jobId:           job.jobId,
+      clientName:      job.clientName,
+      listName:        job.listName,
+      outputFilename:  job.outputFilename,
+      driveUrl:        job.driveUrl ?? null,
+      status:          job.status,
+      endedAt:         job.endedAt ?? null,
+      totalJobsInDrive: driveJobs.length,
+    });
+  }
+
+  // Fall back to local
+  const localCompleted = readJobsFromDir("completed")
+    .sort((a, b) => ((b.endedAt ?? b.createdAt) > (a.endedAt ?? a.createdAt) ? 1 : -1));
+
+  if (!localCompleted.length) {
+    return res.json({ found: false, source: "local", message: "No completed jobs", driveError });
+  }
+
+  const job = localCompleted[0];
   const jobPath = path.join(ROOT, "jobs", "completed", `${job.jobId}.json`);
   res.json({
+    source:         "local",
     jobId:          job.jobId,
     clientName:     job.clientName,
     listName:       job.listName,
@@ -345,6 +421,7 @@ app.get("/api/test-download", (_req, res) => {
     jobFilePath:    jobPath,
     jobFileExists:  fs.existsSync(jobPath),
     endedAt:        job.endedAt ?? null,
+    driveError,
   });
 });
 

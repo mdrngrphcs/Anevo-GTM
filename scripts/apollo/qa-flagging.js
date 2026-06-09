@@ -5,7 +5,7 @@ const fs = require("fs");
 const { parse } = require("csv-parse/sync");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
-const { uploadToDrive } = require("../utils/drive-uploader");
+const { uploadToDrive, uploadJobJson } = require("../utils/drive-uploader");
 
 const ROOT = path.resolve(__dirname, "../..");
 
@@ -110,20 +110,22 @@ function flagRow(row) {
 function saveJobDriveUrl(job, driveUrl) {
   if (!job) {
     log("  Warning: saveJobDriveUrl called with no job — driveUrl not persisted");
-    return;
+    return null;
   }
   const jobPath = path.join(ROOT, "jobs/completed", `${job.jobId}.json`);
   log(`  Saving driveUrl to: ${jobPath}`);
   if (!fs.existsSync(jobPath)) {
     log(`  Warning: job file not found at ${jobPath} — driveUrl not persisted`);
-    return;
+    return null;
   }
   try {
     const updated = { ...job, driveUrl };
     fs.writeFileSync(jobPath, JSON.stringify(updated, null, 2));
     log(`  driveUrl saved successfully to ${jobPath}`);
+    return updated;
   } catch (err) {
     log(`  Warning: could not save driveUrl to job JSON: ${err.message}`);
+    return null;
   }
 }
 
@@ -188,7 +190,12 @@ async function main() {
     try {
       const driveUrl = await uploadToDrive(finalPath, finalFilename);
       log(`Uploaded to Drive: ${driveUrl}`);
-      saveJobDriveUrl(job, driveUrl);
+      const updatedJob = saveJobDriveUrl(job, driveUrl);
+      if (updatedJob) {
+        uploadJobJson(job.jobId, updatedJob)
+          .then(() => log(`  Job JSON synced to Drive: ${job.jobId}`))
+          .catch((err) => log(`  Warning: Drive job JSON upload failed: ${err.message}`));
+      }
     } catch (err) {
       log(`  Warning: Drive upload failed (file still saved locally): ${err.message}`);
     }
