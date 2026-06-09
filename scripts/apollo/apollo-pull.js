@@ -267,6 +267,16 @@ async function main() {
   const step1Elapsed = ((Date.now() - step1Start) / 1000).toFixed(1);
   log(jobId, `Step 1 — Complete: ${people.length} record(s) in ${step1Elapsed}s`);
 
+  // Hard cap — safety net if the loop exited via batch-size check instead of
+  // the limit check (e.g. last page returned exactly PER_PAGE records).
+  if (recordLimit && people.length > recordLimit) {
+    const before = people.length;
+    people.splice(recordLimit);
+    log(jobId, `Record limit applied: returning ${people.length} of ${before} results`);
+  } else if (recordLimit) {
+    log(jobId, `Record limit applied: returning ${people.length} of ${totalEntries ?? people.length} results`);
+  }
+
   // ── Step 2: Email Enrichment (1 credit per email found) ───────────────────
   // Pass Apollo's internal person id — the free search returns id even though
   // names/LinkedIn are blinded, and bulk_match accepts id for exact matching.
