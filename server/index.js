@@ -228,11 +228,6 @@ app.get("/api/orders", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 const APOLLO_ENDPOINT   = "https://api.apollo.io/v1/mixed_people/api_search";
-const HEADCOUNT_BUCKETS = [
-  [1,10],[11,20],[21,50],[51,100],[101,200],
-  [201,500],[501,1000],[1001,2000],[2001,5000],
-  [5001,10000],[10001,20000],[20001,50000],
-];
 
 // Real Apollo industry MongoDB ObjectIDs — discovered via organizations/search API
 const APOLLO_INDUSTRY_IDS = {
@@ -412,12 +407,9 @@ function translateFilters(icp) {
   if (unmappedExcludes.length)   params.q_not_organization_keyword_tags   = unmappedExcludes;
 
   if (icp.headcount?.min != null || icp.headcount?.max != null) {
-    const lo = icp.headcount.min ?? 0;
-    const hi = icp.headcount.max ?? Infinity;
-    const ranges = HEADCOUNT_BUCKETS
-      .filter(([bLo, bHi]) => bHi >= lo && bLo <= hi)
-      .map(([bLo, bHi]) => `${bLo},${bHi}`);
-    if (ranges.length) params.organization_num_employees_ranges = ranges;
+    const lo = icp.headcount.min != null ? icp.headcount.min : "";
+    const hi = icp.headcount.max != null ? icp.headcount.max : "";
+    params.organization_num_employees_ranges = [`${lo},${hi}`];
   }
   return params;
 }
